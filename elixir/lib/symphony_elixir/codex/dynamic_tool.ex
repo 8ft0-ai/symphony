@@ -4,6 +4,7 @@ defmodule SymphonyElixir.Codex.DynamicTool do
   """
 
   alias SymphonyElixir.Linear.Client
+  alias SymphonyElixir.TextSanitizer
 
   @linear_graphql_tool "linear_graphql"
   @linear_graphql_description """
@@ -93,7 +94,7 @@ defmodule SymphonyElixir.Codex.DynamicTool do
   defp normalize_query(arguments) do
     case Map.get(arguments, "query") || Map.get(arguments, :query) do
       query when is_binary(query) ->
-        case String.trim(query) do
+        case query |> String.trim() |> TextSanitizer.sanitize_user_visible_text() do
           "" -> {:error, :missing_query}
           trimmed -> {:ok, trimmed}
         end
@@ -105,7 +106,7 @@ defmodule SymphonyElixir.Codex.DynamicTool do
 
   defp normalize_variables(arguments) do
     case Map.get(arguments, "variables") || Map.get(arguments, :variables) || %{} do
-      variables when is_map(variables) -> {:ok, variables}
+      variables when is_map(variables) -> {:ok, TextSanitizer.sanitize_graphql_value(variables)}
       _ -> {:error, :invalid_variables}
     end
   end
