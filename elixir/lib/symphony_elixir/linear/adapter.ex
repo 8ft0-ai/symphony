@@ -51,7 +51,11 @@ defmodule SymphonyElixir.Linear.Adapter do
   def create_comment(issue_id, body) when is_binary(issue_id) and is_binary(body) do
     sanitized_body = TextSanitizer.sanitize_user_visible_text(body)
 
-    with {:ok, response} <- client_module().graphql(@create_comment_mutation, %{issueId: issue_id, body: sanitized_body}),
+    with {:ok, response} <-
+           client_module().graphql(
+             @create_comment_mutation,
+             %{issueId: issue_id, body: sanitized_body}
+           ),
          true <- get_in(response, ["data", "commentCreate", "success"]) == true do
       :ok
     else
