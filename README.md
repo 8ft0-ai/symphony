@@ -36,6 +36,43 @@ help with the setup:
 
 ---
 
+## Fork Workflow
+
+If you are using this repository as a fork with local-only fixes, keep four branch roles:
+
+- `upstream/main`: canonical upstream history
+- `origin/main`: your fork's mirror of upstream
+- `local/main`: long-lived integration branch for fixes you want to carry locally
+- `fix/*`: short-lived topic branches for individual local changes
+
+Recommended rules:
+
+- Keep `main` clean. Do not commit directly to it.
+- Sync `main` from `upstream/main`, then push that fast-forward to `origin/main`.
+- Branch local-only work from `local/main`.
+- Branch upstreamable work from `main`.
+- Merge finished local fixes back into `local/main` so you have a single branch that represents
+  upstream plus your local patch set.
+- Prefer PRs for code changes instead of direct commits to `local/main`.
+- Target local-only PRs at `local/main`.
+- Use squash merge into `local/main`.
+
+Typical sync and branch flow:
+
+```bash
+git fetch upstream --prune
+git switch main
+git merge --ff-only upstream/main
+git push origin main
+
+git switch local/main
+git merge main
+
+git switch -c fix/<change-name> local/main
+```
+
+This fork uses `origin` for your fork and `upstream` for `openai/symphony`.
+
 ## License
 
 This project is licensed under the [Apache License 2.0](LICENSE).
