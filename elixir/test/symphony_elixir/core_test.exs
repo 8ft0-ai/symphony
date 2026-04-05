@@ -1594,10 +1594,10 @@ defmodule SymphonyElixir.CoreTest do
                      }
                    }
 
-                    payload["method"] == "turn/start" &&
-                      Map.has_key?(payload["params"], "cwd") == false &&
-                      get_in(payload, ["params", "approvalPolicy"]) == expected_approval_policy &&
-                      get_in(payload, ["params", "sandboxPolicy"]) == expected_turn_sandbox_policy
+                   payload["method"] == "turn/start" &&
+                     Map.has_key?(payload["params"], "cwd") == false &&
+                     get_in(payload, ["params", "approvalPolicy"]) == expected_approval_policy &&
+                     get_in(payload, ["params", "sandboxPolicy"]) == expected_turn_sandbox_policy
                  end)
                else
                  false
