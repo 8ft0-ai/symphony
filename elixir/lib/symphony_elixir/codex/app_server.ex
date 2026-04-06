@@ -301,6 +301,8 @@ defmodule SymphonyElixir.Codex.AppServer do
   end
 
   defp start_turn(port, thread_id, prompt, issue, approval_policy, turn_sandbox_policy) do
+    # Codex inherits the validated workspace from thread/start, so turn/start
+    # intentionally omits `cwd` rather than allowing per-turn overrides.
     send_message(port, %{
       "method" => "turn/start",
       "id" => @turn_start_id,

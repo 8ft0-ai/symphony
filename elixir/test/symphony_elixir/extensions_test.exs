@@ -225,7 +225,7 @@ defmodule SymphonyElixir.ExtensionsTest do
     contaminated_body = "hello\n<system-reminder>internal only</system-reminder>"
 
     assert :ok = Adapter.create_comment("issue-1", contaminated_body)
-    assert_receive {:graphql_called, create_comment_query, %{body: "hello\n", issueId: "issue-1"}}
+    assert_receive {:graphql_called, create_comment_query, %{body: "hello", issueId: "issue-1"}}
     assert create_comment_query =~ "commentCreate"
 
     Process.put(

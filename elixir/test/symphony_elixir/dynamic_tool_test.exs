@@ -88,8 +88,8 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
 
     assert_received {:linear_client_called, forwarded_query, variables, []}
     refute forwarded_query =~ "system-reminder"
-    assert variables["body"] == "hello\n"
-    assert variables["nested"] == [%{"note" => "keep\n"}]
+    assert variables["body"] == "hello"
+    assert variables["nested"] == [%{"note" => "keep"}]
     assert response["success"] == true
   end
 

@@ -3,11 +3,21 @@ defmodule SymphonyElixir.TextSanitizer do
   Sanitizes internal control text before Symphony persists user-visible content.
   """
 
-  @system_reminder_pattern ~r/<system-reminder\b[^>]*>.*?<\/system-reminder>/is
+  @system_reminder_pattern Regex.compile!(
+                             ~s"<system-reminder\\b(?:[^>\"']|\"[^\"]*\"|'[^']*')*>.*?</system-reminder>",
+                             "is"
+                           )
+  @system_reminder_line_pattern Regex.compile!(
+                                  ~s"(^|\\r?\\n)[ \\t]*<system-reminder\\b(?:[^>\"']|\"[^\"]*\"|'[^']*')*>.*?</system-reminder>[ \\t]*(\\r?\\n|$)",
+                                  "is"
+                                )
 
   @spec sanitize_user_visible_text(String.t()) :: String.t()
   def sanitize_user_visible_text(text) when is_binary(text) do
-    Regex.replace(@system_reminder_pattern, text, "")
+    without_reminder_lines =
+      Regex.replace(@system_reminder_line_pattern, text, &replace_system_reminder_line/3)
+
+    Regex.replace(@system_reminder_pattern, without_reminder_lines, "")
   end
 
   @spec sanitize_graphql_value(term()) :: term()
@@ -22,4 +32,11 @@ defmodule SymphonyElixir.TextSanitizer do
   end
 
   def sanitize_graphql_value(value), do: value
+
+  defp replace_system_reminder_line(_match, prefix, suffix)
+       when prefix != "" and suffix != "" do
+    prefix
+  end
+
+  defp replace_system_reminder_line(_match, _prefix, _suffix), do: ""
 end
