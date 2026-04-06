@@ -1390,7 +1390,8 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
       {"item/commandExecution/requestApproval", %{"params" => %{"parsedCmd" => "git status"}}, "command approval requested (git status)"},
       {"item/fileChange/requestApproval", %{"params" => %{"fileChangeCount" => 2}}, "file change approval requested (2 files)"},
       {"item/tool/call", %{"params" => %{"tool" => "linear_graphql"}}, "dynamic tool call requested (linear_graphql)"},
-      {"item/tool/requestUserInput", %{"params" => %{"question" => "Continue?"}}, "tool requires user input: Continue?"}
+      {"item/tool/requestUserInput", %{"params" => %{"question" => "Continue?"}}, "tool requires user input: Continue?"},
+      {"mcpServer/elicitation/request", %{"params" => %{"serverLabel" => "Linear", "message" => "Allow Save issue?"}}, "mcp elicitation requested: Allow Save issue?"}
     ]
 
     Enum.each(event_cases, fn {method, payload, expected_fragment} ->
@@ -1498,6 +1499,34 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     humanized = StatusDashboard.humanize_codex_message(message)
     assert humanized =~ "tool requires user input"
     assert humanized =~ "auto-answered"
+  end
+
+  test "status dashboard humanizes MCP elicitation failures as the blocking reason" do
+    request = %{
+      event: :mcp_elicitation_requested,
+      message: %{
+        "method" => "mcpServer/elicitation/request",
+        "params" => %{"serverLabel" => "Linear", "message" => "Allow Save issue?"}
+      }
+    }
+
+    turn_error = %{
+      event: :turn_ended_with_error,
+      message: %{
+        reason:
+          {:mcp_elicitation_required,
+           %{
+             "method" => "mcpServer/elicitation/request",
+             "params" => %{"serverLabel" => "Linear", "message" => "Allow Save issue?"}
+           }}
+      }
+    }
+
+    assert StatusDashboard.humanize_codex_message(request) ==
+             "mcp elicitation requested: Allow Save issue?"
+
+    assert StatusDashboard.humanize_codex_message(turn_error) ==
+             "turn ended with error: mcp elicitation requested: Allow Save issue?"
   end
 
   test "status dashboard enriches wrapper reasoning and message streaming events with payload context" do

@@ -1104,6 +1104,9 @@ defmodule SymphonyElixir.StatusDashboard do
     end
   end
 
+  defp humanize_codex_event(:mcp_elicitation_requested, _message, payload),
+    do: humanize_mcp_elicitation(payload)
+
   defp humanize_codex_event(:turn_input_required, _message, _payload), do: "turn blocked: waiting for user input"
 
   defp humanize_codex_event(:approval_auto_approved, message, payload) do
@@ -1360,6 +1363,9 @@ defmodule SymphonyElixir.StatusDashboard do
       "tool requires user input"
     end
   end
+
+  defp humanize_codex_method("mcpServer/elicitation/request", payload),
+    do: humanize_mcp_elicitation(payload)
 
   defp humanize_codex_method("tool/requestUserInput", payload),
     do: humanize_codex_method("item/tool/requestUserInput", payload)
@@ -1652,6 +1658,7 @@ defmodule SymphonyElixir.StatusDashboard do
 
   defp format_rate_limit_bucket_summary(_bucket), do: nil
 
+  defp format_error_value({:mcp_elicitation_required, payload}), do: humanize_mcp_elicitation(payload)
   defp format_error_value(%{"message" => message}) when is_binary(message), do: message
   defp format_error_value(%{message: message}) when is_binary(message), do: message
   defp format_error_value(error), do: inspect(error, limit: 10)
@@ -1669,6 +1676,94 @@ defmodule SymphonyElixir.StatusDashboard do
   end
 
   defp format_reason(other), do: format_error_value(other)
+
+  defp humanize_mcp_elicitation(payload) do
+    summary =
+      payload
+      |> mcp_elicitation_summary()
+      |> case do
+        nil -> mcp_elicitation_server(payload)
+        text -> text
+      end
+
+    if is_binary(summary) and String.trim(summary) != "" do
+      "mcp elicitation requested: #{inline_text(summary)}"
+    else
+      "mcp elicitation requested"
+    end
+  end
+
+  defp mcp_elicitation_summary(payload) do
+    Enum.find_value(mcp_elicitation_summary_paths(), fn path ->
+      case map_path(payload, path) do
+        value when is_binary(value) and value != "" -> value
+        _ -> nil
+      end
+    end)
+  end
+
+  defp mcp_elicitation_server(payload) do
+    Enum.find_value(mcp_elicitation_server_paths(), fn path ->
+      case map_path(payload, path) do
+        value when is_binary(value) and value != "" -> "from #{value}"
+        _ -> nil
+      end
+    end)
+  end
+
+  defp mcp_elicitation_summary_paths do
+    [
+      ["params", "title"],
+      [:params, :title],
+      ["params", "question"],
+      [:params, :question],
+      ["params", "prompt"],
+      [:params, :prompt],
+      ["params", "message"],
+      [:params, :message],
+      ["params", "reason"],
+      [:params, :reason],
+      ["params", "summary"],
+      [:params, :summary],
+      ["params", "description"],
+      [:params, :description],
+      ["params", "request", "title"],
+      [:params, :request, :title],
+      ["params", "request", "question"],
+      [:params, :request, :question],
+      ["params", "request", "prompt"],
+      [:params, :request, :prompt],
+      ["params", "request", "message"],
+      [:params, :request, :message],
+      ["params", "request", "description"],
+      [:params, :request, :description],
+      ["params", "elicitation", "title"],
+      [:params, :elicitation, :title],
+      ["params", "elicitation", "question"],
+      [:params, :elicitation, :question],
+      ["params", "elicitation", "prompt"],
+      [:params, :elicitation, :prompt],
+      ["params", "elicitation", "message"],
+      [:params, :elicitation, :message],
+      ["params", "elicitation", "description"],
+      [:params, :elicitation, :description]
+    ]
+  end
+
+  defp mcp_elicitation_server_paths do
+    [
+      ["params", "serverLabel"],
+      [:params, :serverLabel],
+      ["params", "serverName"],
+      [:params, :serverName],
+      ["params", "server_name"],
+      [:params, :server_name],
+      ["params", "request", "serverLabel"],
+      [:params, :request, :serverLabel],
+      ["params", "request", "serverName"],
+      [:params, :request, :serverName]
+    ]
+  end
 
   defp humanize_streaming_event(label, payload) do
     case extract_delta_preview(payload) do

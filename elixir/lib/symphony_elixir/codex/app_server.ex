@@ -473,6 +473,16 @@ defmodule SymphonyElixir.Codex.AppServer do
            tool_executor,
            auto_approve_requests
          ) do
+      :mcp_elicitation_required ->
+        emit_message(
+          on_message,
+          :mcp_elicitation_requested,
+          %{payload: payload, raw: payload_string},
+          metadata
+        )
+
+        {:error, {:mcp_elicitation_required, payload}}
+
       :input_required ->
         emit_message(
           on_message,
@@ -521,6 +531,19 @@ defmodule SymphonyElixir.Codex.AppServer do
           receive_loop(port, on_message, timeout_ms, "", tool_executor, auto_approve_requests)
         end
     end
+  end
+
+  defp maybe_handle_approval_request(
+         _port,
+         "mcpServer/elicitation/request",
+         _payload,
+         _payload_string,
+         _on_message,
+         _metadata,
+         _tool_executor,
+         _auto_approve_requests
+       ) do
+    :mcp_elicitation_required
   end
 
   defp maybe_handle_approval_request(
