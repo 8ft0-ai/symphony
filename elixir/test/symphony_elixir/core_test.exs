@@ -105,7 +105,15 @@ defmodule SymphonyElixir.CoreTest do
 
     hooks = Map.get(config, "hooks", %{})
     assert is_map(hooks)
-    assert Map.get(hooks, "after_create") =~ "git clone --depth 1 https://github.com/openai/symphony ."
+
+    assert Map.get(hooks, "after_create") =~
+             "FORK_URL=\"${SYMPHONY_FORK_URL:-https://github.com/8ft0-ai/symphony}\""
+
+    assert Map.get(hooks, "after_create") =~
+             "LOCAL_SRC=\"${SYMPHONY_LOCAL_SOURCE:-/Users/jan/dev/8ft0-ai/symphony}\""
+
+    assert Map.get(hooks, "after_create") =~ "git clone \"$FORK_URL\" ."
+    assert Map.get(hooks, "after_create") =~ "git remote add upstream https://github.com/openai/symphony || true"
     assert Map.get(hooks, "after_create") =~ "cd elixir && mise trust"
     assert Map.get(hooks, "after_create") =~ "mise exec -- mix deps.get"
     assert Map.get(hooks, "before_remove") =~ "cd elixir && mise exec -- mix workspace.before_remove"

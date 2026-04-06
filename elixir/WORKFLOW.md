@@ -19,7 +19,24 @@ workspace:
   root: ~/code/symphony-workspaces
 hooks:
   after_create: |
-    git clone --depth 1 https://github.com/openai/symphony .
+    set -eu
+
+    FORK_URL="${SYMPHONY_FORK_URL:-https://github.com/8ft0-ai/symphony}"
+    LOCAL_SRC="${SYMPHONY_LOCAL_SOURCE:-/Users/jan/dev/8ft0-ai/symphony}"
+
+    git clone "$FORK_URL" .
+    git remote add upstream https://github.com/openai/symphony || true
+
+    if command -v rsync >/dev/null 2>&1 && [ -d "$LOCAL_SRC/.git" ]; then
+      rsync -a \
+        --exclude .git \
+        --exclude .DS_Store \
+        --exclude elixir/_build \
+        --exclude elixir/deps \
+        --exclude elixir/.elixir_ls \
+        "$LOCAL_SRC"/ ./
+    fi
+
     if command -v mise >/dev/null 2>&1; then
       cd elixir && mise trust && mise exec -- mix deps.get
     fi
