@@ -1,0 +1,13 @@
+Use the `plan-executor` skill.
+
+Implement the work described in:
+- /Users/jan/dev/8ft0-ai/symphony/plans/002/symphony-mcp-elicitation-stall-fix-plan.md
+- /Users/jan/dev/8ft0-ai/symphony/plans/002/symphony-mcp-elicitation-stall-fix-checklist.md
+
+Rules:
+- Read the plan and checklist first.
+- Execute the work in small coherent batches.
+- Keep the checklist updated as you complete or block items.
+- Do not mark checklist items complete until the code and validation for that item are done.
+- Preserve the current checklist structure unless it is misleading.
+- Stop only for a real blocker; otherwise keep implementing.
