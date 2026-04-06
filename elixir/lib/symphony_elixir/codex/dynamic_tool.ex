@@ -4,11 +4,16 @@ defmodule SymphonyElixir.Codex.DynamicTool do
   """
 
   alias SymphonyElixir.Linear.Client
+  alias SymphonyElixir.RunDisposition
   alias SymphonyElixir.TextSanitizer
 
   @linear_graphql_tool "linear_graphql"
+  @report_run_outcome_tool "report_run_outcome"
   @linear_graphql_description """
   Execute a raw GraphQL query or mutation against Linear using Symphony's configured auth.
+  """
+  @report_run_outcome_description """
+  Report a structured Symphony run outcome for the current unattended turn. Use this when the run is intentionally blocked and should not be retried automatically.
   """
   @linear_graphql_input_schema %{
     "type" => "object",
@@ -26,10 +31,46 @@ defmodule SymphonyElixir.Codex.DynamicTool do
       }
     }
   }
+  @report_run_outcome_input_schema %{
+    "type" => "object",
+    "additionalProperties" => false,
+    "required" => ["status", "summary"],
+    "properties" => %{
+      "status" => %{
+        "type" => "string",
+        "enum" => ["completed", "blocked"],
+        "description" => "Structured run outcome status to record with Symphony."
+      },
+      "summary" => %{
+        "type" => "string",
+        "description" => "Short human-readable summary of the outcome."
+      },
+      "reason_code" => %{
+        "type" => "string",
+        "description" => "Required when status=blocked. Use a stable snake_case blocker code."
+      },
+      "retryable" => %{
+        "type" => "boolean",
+        "description" => "Blocked outcomes must set retryable=false when provided."
+      },
+      "clearance_hint" => %{
+        "type" => ["string", "null"],
+        "description" => "Short explanation of what must change before Symphony should retry."
+      },
+      "details" => %{
+        "type" => ["object", "null"],
+        "description" => "Optional machine-readable context for observability.",
+        "additionalProperties" => true
+      }
+    }
+  }
 
   @spec execute(String.t() | nil, term(), keyword()) :: map()
   def execute(tool, arguments, opts \\ []) do
     case tool do
+      @report_run_outcome_tool ->
+        execute_report_run_outcome(arguments, opts)
+
       @linear_graphql_tool ->
         execute_linear_graphql(arguments, opts)
 
@@ -47,6 +88,11 @@ defmodule SymphonyElixir.Codex.DynamicTool do
   def tool_specs do
     [
       %{
+        "name" => @report_run_outcome_tool,
+        "description" => @report_run_outcome_description,
+        "inputSchema" => @report_run_outcome_input_schema
+      },
+      %{
         "name" => @linear_graphql_tool,
         "description" => @linear_graphql_description,
         "inputSchema" => @linear_graphql_input_schema
@@ -61,6 +107,29 @@ defmodule SymphonyElixir.Codex.DynamicTool do
          {:ok, response} <- linear_client.(query, variables, []) do
       graphql_response(response)
     else
+      {:error, reason} ->
+        failure_response(tool_error_payload(reason))
+    end
+  end
+
+  defp execute_report_run_outcome(arguments, opts) do
+    reporter = Keyword.get(opts, :reporter, fn _disposition -> :ok end)
+
+    case RunDisposition.normalize_report_arguments(arguments) do
+      {:ok, disposition} ->
+        :ok = reporter.(disposition)
+
+        success_response(%{
+          "recorded" => %{
+            "status" => Atom.to_string(disposition.status),
+            "reasonCode" => disposition.reason_code,
+            "summary" => disposition.summary,
+            "retryable" => disposition.retryable,
+            "clearanceHint" => disposition.clearance_hint,
+            "details" => disposition.details
+          }
+        })
+
       {:error, reason} ->
         failure_response(tool_error_payload(reason))
     end
@@ -126,6 +195,10 @@ defmodule SymphonyElixir.Codex.DynamicTool do
     dynamic_tool_response(false, encode_payload(payload))
   end
 
+  defp success_response(payload) do
+    dynamic_tool_response(true, encode_payload(payload))
+  end
+
   defp dynamic_tool_response(success, output) when is_boolean(success) and is_binary(output) do
     %{
       "success" => success,
@@ -149,6 +222,78 @@ defmodule SymphonyElixir.Codex.DynamicTool do
     %{
       "error" => %{
         "message" => "`linear_graphql` requires a non-empty `query` string."
+      }
+    }
+  end
+
+  defp tool_error_payload(:invalid_report_arguments) do
+    %{
+      "error" => %{
+        "message" => "`report_run_outcome` expects an object with only `status`, `summary`, `reason_code`, `retryable`, `clearance_hint`, and `details`."
+      }
+    }
+  end
+
+  defp tool_error_payload(:missing_report_status) do
+    %{
+      "error" => %{
+        "message" => "`report_run_outcome` requires a `status` of `completed` or `blocked`."
+      }
+    }
+  end
+
+  defp tool_error_payload(:invalid_report_status) do
+    %{
+      "error" => %{
+        "message" => "`report_run_outcome.status` must be either `completed` or `blocked`."
+      }
+    }
+  end
+
+  defp tool_error_payload(:missing_report_summary) do
+    %{
+      "error" => %{
+        "message" => "`report_run_outcome` requires a non-empty `summary` string."
+      }
+    }
+  end
+
+  defp tool_error_payload(:invalid_report_text) do
+    %{
+      "error" => %{
+        "message" => "`report_run_outcome.summary` and `clearance_hint` must be strings when provided."
+      }
+    }
+  end
+
+  defp tool_error_payload(:missing_report_reason_code) do
+    %{
+      "error" => %{
+        "message" => "`report_run_outcome` requires `reason_code` when `status` is `blocked`."
+      }
+    }
+  end
+
+  defp tool_error_payload(:invalid_report_reason_code) do
+    %{
+      "error" => %{
+        "message" => "`report_run_outcome.reason_code` must be a non-empty snake_case string such as `git_metadata_writes_unavailable`."
+      }
+    }
+  end
+
+  defp tool_error_payload(:invalid_report_retryable) do
+    %{
+      "error" => %{
+        "message" => "`report_run_outcome.retryable` must be boolean when provided, and blocked outcomes must leave it false."
+      }
+    }
+  end
+
+  defp tool_error_payload(:invalid_report_details) do
+    %{
+      "error" => %{
+        "message" => "`report_run_outcome.details` must be a JSON object when provided."
       }
     }
   end

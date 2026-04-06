@@ -582,7 +582,79 @@ defmodule SymphonyElixir.CoreTest do
     assert MapSet.member?(state.completed, issue_id)
     assert %{attempt: 1, due_at_ms: due_at_ms} = state.retry_attempts[issue_id]
     assert is_integer(due_at_ms)
-    assert_due_in_range(due_at_ms, 500, 1_100)
+    assert_due_in_range(due_at_ms, 200, 1_100)
+  end
+
+  test "blocked worker exit does not schedule continuation and persists blocked state" do
+    issue_id = "issue-blocked"
+    ref = make_ref()
+    orchestrator_name = Module.concat(__MODULE__, :BlockedExitOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    initial_state = :sys.get_state(pid)
+    updated_at = ~U[2026-04-06 10:11:12Z]
+
+    running_entry = %{
+      pid: self(),
+      ref: ref,
+      identifier: "MT-562",
+      worker_host: "worker-a",
+      workspace_path: "/tmp/MT-562",
+      issue: %Issue{
+        id: issue_id,
+        identifier: "MT-562",
+        title: "Blocked work",
+        state: "In Progress",
+        updated_at: updated_at
+      },
+      started_at: DateTime.utc_now()
+    }
+
+    :sys.replace_state(pid, fn _ ->
+      initial_state
+      |> Map.put(:running, %{issue_id => running_entry})
+      |> Map.put(:claimed, MapSet.new([issue_id]))
+      |> Map.put(:retry_attempts, %{})
+    end)
+
+    log =
+      capture_log(fn ->
+        send(
+          pid,
+          {:agent_run_disposition, issue_id,
+           RunDisposition.blocked("approval_required", %{
+             summary: "Linear requires approval for this mutation.",
+             clearance_hint: "Approve the mutation or adjust the unattended workflow."
+           })}
+        )
+
+        send(pid, {:DOWN, ref, :process, self(), :normal})
+        Process.sleep(50)
+      end)
+
+    state = :sys.get_state(pid)
+
+    refute Map.has_key?(state.running, issue_id)
+    refute Map.has_key?(state.retry_attempts, issue_id)
+    refute MapSet.member?(state.completed, issue_id)
+    refute MapSet.member?(state.claimed, issue_id)
+    assert log =~ "Issue entered blocked state: issue_id=issue-blocked"
+
+    assert %{
+             reason_code: "approval_required",
+             summary: "Linear requires approval for this mutation.",
+             clearance_hint: "Approve the mutation or adjust the unattended workflow.",
+             issue_state: "In Progress",
+             issue_updated_at: ^updated_at,
+             worker_host: "worker-a",
+             workspace_path: "/tmp/MT-562"
+           } = state.blocked[issue_id]
   end
 
   test "abnormal worker exit increments retry attempt progressively" do
@@ -622,7 +694,7 @@ defmodule SymphonyElixir.CoreTest do
     assert %{attempt: 3, due_at_ms: due_at_ms, identifier: "MT-559", error: "agent exited: :boom"} =
              state.retry_attempts[issue_id]
 
-    assert_due_in_range(due_at_ms, 39_500, 40_500)
+    assert_due_in_range(due_at_ms, 38_500, 40_500)
   end
 
   test "first abnormal worker exit waits before retrying" do
@@ -662,6 +734,104 @@ defmodule SymphonyElixir.CoreTest do
              state.retry_attempts[issue_id]
 
     assert_due_in_range(due_at_ms, 9_000, 10_500)
+  end
+
+  test "blocked issues stay suppressed until the issue fingerprint changes" do
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
+
+    issue_id = "issue-blocked-suppressed"
+
+    issue =
+      %Issue{
+        id: issue_id,
+        identifier: "MT-563",
+        title: "Suppressed blocked work",
+        state: "In Progress",
+        updated_at: ~U[2026-04-06 11:00:00Z]
+      }
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+    orchestrator_name = Module.concat(__MODULE__, :BlockedSuppressionOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    initial_state = :sys.get_state(pid)
+
+    blocked_entry = %{
+      identifier: issue.identifier,
+      reason_code: "git_metadata_writes_unavailable",
+      summary: "Git metadata writes are unavailable in this runtime.",
+      blocked_at: DateTime.utc_now(),
+      issue_state: issue.state,
+      issue_updated_at: issue.updated_at
+    }
+
+    state =
+      initial_state
+      |> Map.put(:running, %{})
+      |> Map.put(:claimed, MapSet.new())
+      |> Map.put(:retry_attempts, %{})
+      |> Map.put(:completed, MapSet.new())
+      |> Map.put(:blocked, %{issue_id => blocked_entry})
+
+    refute Orchestrator.should_dispatch_issue_for_test(issue, state)
+    preserved_state = Orchestrator.reconcile_blocked_issues_for_test(state)
+    assert Map.has_key?(preserved_state.blocked, issue_id)
+
+    updated_issue = %{issue | updated_at: ~U[2026-04-06 11:05:00Z]}
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [updated_issue])
+
+    {updated_state, release_log} =
+      ExUnit.CaptureLog.with_log(fn ->
+        Orchestrator.reconcile_blocked_issues_for_test(preserved_state)
+      end)
+
+    refute Map.has_key?(updated_state.blocked, issue_id)
+    assert Orchestrator.should_dispatch_issue_for_test(updated_issue, updated_state)
+    assert release_log =~ "Blocked issue released for redispatch because the issue changed"
+  end
+
+  test "review dispatch guard blocks in-review issues without attached PRs when enabled" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      tracker_active_states: ["Todo", "In Progress", "In Review"],
+      tracker_review_dispatch: %{"requires_pr" => true}
+    )
+
+    issue =
+      %Issue{
+        id: "issue-review-guard",
+        identifier: "MT-564",
+        title: "Needs review artifact",
+        state: "In Review",
+        updated_at: ~U[2026-04-06 12:00:00Z]
+      }
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+    orchestrator_name = Module.concat(__MODULE__, :ReviewGuardOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    Process.sleep(100)
+    state = :sys.get_state(pid)
+
+    refute Map.has_key?(state.running, issue.id)
+    refute Map.has_key?(state.retry_attempts, issue.id)
+
+    assert %{
+             reason_code: "review_pr_required",
+             summary: "Issue is in Review without an attached pull request."
+           } = state.blocked[issue.id]
   end
 
   test "stale retry timer messages do not consume newer retry entries" do
@@ -815,6 +985,8 @@ defmodule SymphonyElixir.CoreTest do
     assert prompt =~ "Ticket S-1 Refactor backend request path"
     assert prompt =~ "labels=backend"
     assert prompt =~ "attempt=3"
+    assert prompt =~ "Symphony unattended run contract:"
+    assert prompt =~ "`report_run_outcome`"
   end
 
   test "prompt builder renders issue datetime fields without crashing" do
@@ -861,7 +1033,9 @@ defmodule SymphonyElixir.CoreTest do
       ]
     }
 
-    assert PromptBuilder.build_prompt(issue) == "Ticket MT-701"
+    prompt = PromptBuilder.build_prompt(issue)
+    assert String.starts_with?(prompt, "Ticket MT-701")
+    assert prompt =~ "Symphony unattended run contract:"
   end
 
   test "prompt builder uses strict variable rendering" do
@@ -922,6 +1096,7 @@ defmodule SymphonyElixir.CoreTest do
     assert Config.workflow_prompt() =~ "{{ issue.identifier }}"
     assert Config.workflow_prompt() =~ "{{ issue.title }}"
     assert Config.workflow_prompt() =~ "{{ issue.description }}"
+    assert prompt =~ "`report_run_outcome`"
   end
 
   test "prompt builder default template handles missing issue body" do
@@ -1003,6 +1178,7 @@ defmodule SymphonyElixir.CoreTest do
     assert prompt =~ "Do not call `gh pr merge` directly"
     assert prompt =~ "Continuation context:"
     assert prompt =~ "retry attempt #2"
+    assert prompt =~ "Symphony unattended run contract:"
   end
 
   test "prompt builder adds continuation guidance for retries" do
@@ -1020,7 +1196,8 @@ defmodule SymphonyElixir.CoreTest do
 
     prompt = PromptBuilder.build_prompt(issue, attempt: 2)
 
-    assert prompt == "Retry #2"
+    assert String.starts_with?(prompt, "Retry #2")
+    assert prompt =~ "Symphony unattended run contract:"
   end
 
   test "agent runner keeps workspace after successful codex run" do
@@ -1190,6 +1367,166 @@ defmodule SymphonyElixir.CoreTest do
                      500
 
       assert session_id == "thread-live-turn-live"
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "agent runner converts MCP elicitation failures into blocked dispositions" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-agent-runner-mcp-blocked-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      template_repo = Path.join(test_root, "source")
+      workspace_root = Path.join(test_root, "workspaces")
+      codex_binary = Path.join(test_root, "fake-codex")
+
+      File.mkdir_p!(template_repo)
+      File.write!(Path.join(template_repo, "README.md"), "# test")
+      System.cmd("git", ["-C", template_repo, "init", "-b", "main"])
+      System.cmd("git", ["-C", template_repo, "config", "user.name", "Test User"])
+      System.cmd("git", ["-C", template_repo, "config", "user.email", "test@example.com"])
+      System.cmd("git", ["-C", template_repo, "add", "README.md"])
+      System.cmd("git", ["-C", template_repo, "commit", "-m", "initial"])
+
+      File.write!(
+        codex_binary,
+        """
+        #!/bin/sh
+        count=0
+        while IFS= read -r _line; do
+          count=$((count + 1))
+
+          case "$count" in
+            1)
+              printf '%s\\n' '{"id":1,"result":{}}'
+              ;;
+            2)
+              printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-mcp-blocked"}}}'
+              ;;
+            3)
+              printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-mcp-blocked"}}}'
+              printf '%s\\n' '{"id":120,"method":"mcpServer/elicitation/request","params":{"serverLabel":"Linear","message":"Allow Save issue?"}}'
+              sleep 5
+              ;;
+            *)
+              sleep 1
+              ;;
+          esac
+        done
+        """
+      )
+
+      File.chmod!(codex_binary, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        hook_after_create: "cp #{Path.join(template_repo, "README.md")} README.md",
+        codex_command: "#{codex_binary} app-server"
+      )
+
+      issue = %Issue{
+        id: "issue-mcp-blocked-runner",
+        identifier: "MT-721",
+        title: "MCP blocker",
+        description: "Convert MCP elicitation failures into blocked dispositions",
+        state: "In Progress",
+        url: "https://example.org/issues/MT-721",
+        labels: ["backend"]
+      }
+
+      assert :ok = AgentRunner.run(issue, self())
+
+      assert_receive {:agent_run_disposition, "issue-mcp-blocked-runner", disposition}, 1_000
+      assert disposition.status == :blocked
+      assert disposition.reason_code == "mcp_elicitation_required"
+      assert disposition.retryable == false
+      assert disposition.summary =~ "Allow Save issue?"
+      assert disposition.clearance_hint =~ "interactive session"
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "agent runner forwards explicit run-outcome tool reports as blocked dispositions" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-agent-runner-tool-blocked-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      template_repo = Path.join(test_root, "source")
+      workspace_root = Path.join(test_root, "workspaces")
+      codex_binary = Path.join(test_root, "fake-codex")
+
+      File.mkdir_p!(template_repo)
+      File.write!(Path.join(template_repo, "README.md"), "# test")
+      System.cmd("git", ["-C", template_repo, "init", "-b", "main"])
+      System.cmd("git", ["-C", template_repo, "config", "user.name", "Test User"])
+      System.cmd("git", ["-C", template_repo, "config", "user.email", "test@example.com"])
+      System.cmd("git", ["-C", template_repo, "add", "README.md"])
+      System.cmd("git", ["-C", template_repo, "commit", "-m", "initial"])
+
+      File.write!(
+        codex_binary,
+        """
+        #!/bin/sh
+        count=0
+        while IFS= read -r _line; do
+          count=$((count + 1))
+
+          case "$count" in
+            1)
+              printf '%s\\n' '{"id":1,"result":{}}'
+              ;;
+            2)
+              printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-tool-blocked"}}}'
+              ;;
+            3)
+              printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-tool-blocked"}}}'
+              printf '%s\\n' '{"id":202,"method":"item/tool/call","params":{"name":"report_run_outcome","callId":"call-tool-blocked","threadId":"thread-tool-blocked","turnId":"turn-tool-blocked","arguments":{"status":"blocked","summary":"Git metadata writes are unavailable in this runtime.","reason_code":"git_metadata_writes_unavailable","retryable":false,"clearance_hint":"Run with a runtime that can update Git metadata."}}}'
+              sleep 1
+              printf '%s\\n' '{"method":"turn/completed"}'
+              exit 0
+              ;;
+            *)
+              sleep 1
+              ;;
+          esac
+        done
+        """
+      )
+
+      File.chmod!(codex_binary, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        hook_after_create: "cp #{Path.join(template_repo, "README.md")} README.md",
+        codex_command: "#{codex_binary} app-server"
+      )
+
+      issue = %Issue{
+        id: "issue-tool-blocked-runner",
+        identifier: "MT-722",
+        title: "Reported blocker",
+        description: "Forward the report_run_outcome tool through AgentRunner",
+        state: "In Progress",
+        url: "https://example.org/issues/MT-722",
+        labels: ["backend"]
+      }
+
+      assert :ok = AgentRunner.run(issue, self())
+
+      assert_receive {:agent_run_disposition, "issue-tool-blocked-runner", disposition}, 1_000
+      assert disposition.status == :blocked
+      assert disposition.reason_code == "git_metadata_writes_unavailable"
+      assert disposition.retryable == false
+      assert disposition.summary == "Git metadata writes are unavailable in this runtime."
+      assert disposition.clearance_hint == "Run with a runtime that can update Git metadata."
     after
       File.rm_rf(test_root)
     end

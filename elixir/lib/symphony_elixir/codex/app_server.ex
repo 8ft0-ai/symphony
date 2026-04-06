@@ -4,7 +4,7 @@ defmodule SymphonyElixir.Codex.AppServer do
   """
 
   require Logger
-  alias SymphonyElixir.{Codex.DynamicTool, Config, PathSafety, SSH}
+  alias SymphonyElixir.{Codex.DynamicTool, Config, PathSafety, RunDisposition, SSH}
 
   @initialize_id 1
   @thread_start_id 2
@@ -12,6 +12,7 @@ defmodule SymphonyElixir.Codex.AppServer do
   @port_line_bytes 1_048_576
   @max_stream_log_bytes 1_000
   @non_interactive_tool_input_answer "This is a non-interactive session. Operator input is unavailable."
+  @reported_run_outcome_key {__MODULE__, :reported_run_outcome}
 
   @type session :: %{
           port: port(),
@@ -84,8 +85,10 @@ defmodule SymphonyElixir.Codex.AppServer do
 
     tool_executor =
       Keyword.get(opts, :tool_executor, fn tool, arguments ->
-        DynamicTool.execute(tool, arguments)
+        DynamicTool.execute(tool, arguments, reporter: &store_reported_run_outcome/1)
       end)
+
+    clear_reported_run_outcome()
 
     case start_turn(port, thread_id, prompt, issue, approval_policy, turn_sandbox_policy) do
       {:ok, turn_id} ->
@@ -107,8 +110,13 @@ defmodule SymphonyElixir.Codex.AppServer do
           {:ok, result} ->
             Logger.info("Codex session completed for #{issue_context(issue)} session_id=#{session_id}")
 
+            disposition =
+              take_reported_run_outcome() ||
+                RunDisposition.completed(%{summary: "Codex turn completed normally."})
+
             {:ok,
              %{
+               disposition: disposition,
                result: result,
                session_id: session_id,
                thread_id: thread_id,
@@ -116,6 +124,7 @@ defmodule SymphonyElixir.Codex.AppServer do
              }}
 
           {:error, reason} ->
+            clear_reported_run_outcome()
             Logger.warning("Codex session ended with error for #{issue_context(issue)} session_id=#{session_id}: #{inspect(reason)}")
 
             emit_message(
@@ -132,6 +141,7 @@ defmodule SymphonyElixir.Codex.AppServer do
         end
 
       {:error, reason} ->
+        clear_reported_run_outcome()
         Logger.error("Codex session failed for #{issue_context(issue)}: #{inspect(reason)}")
         emit_message(on_message, :startup_failed, %{reason: reason}, metadata)
         {:error, reason}
@@ -599,6 +609,8 @@ defmodule SymphonyElixir.Codex.AppServer do
       end
 
     emit_message(on_message, event, %{payload: payload, raw: payload_string}, metadata)
+
+    maybe_emit_run_outcome_reported(on_message, tool_name, payload, payload_string, metadata, result)
 
     :approved
   end
@@ -1116,4 +1128,55 @@ defmodule SymphonyElixir.Codex.AppServer do
   end
 
   defp needs_input_field?(_payload), do: false
+
+  defp store_reported_run_outcome(%RunDisposition{} = disposition) do
+    Process.put(@reported_run_outcome_key, disposition)
+    :ok
+  end
+
+  defp clear_reported_run_outcome do
+    Process.delete(@reported_run_outcome_key)
+    :ok
+  end
+
+  defp take_reported_run_outcome do
+    Process.delete(@reported_run_outcome_key)
+  end
+
+  defp current_reported_run_outcome do
+    Process.get(@reported_run_outcome_key)
+  end
+
+  defp maybe_emit_run_outcome_reported(
+         on_message,
+         "report_run_outcome",
+         payload,
+         payload_string,
+         metadata,
+         %{"success" => true}
+       ) do
+    emit_message(
+      on_message,
+      :run_outcome_reported,
+      %{
+        payload: payload,
+        raw: payload_string,
+        disposition: serialize_reported_run_outcome(current_reported_run_outcome())
+      },
+      metadata
+    )
+  end
+
+  defp maybe_emit_run_outcome_reported(
+         _on_message,
+         _tool_name,
+         _payload,
+         _payload_string,
+         _metadata,
+         _result
+       ),
+       do: :ok
+
+  defp serialize_reported_run_outcome(%RunDisposition{} = disposition), do: RunDisposition.to_map(disposition)
+  defp serialize_reported_run_outcome(disposition), do: disposition
 end

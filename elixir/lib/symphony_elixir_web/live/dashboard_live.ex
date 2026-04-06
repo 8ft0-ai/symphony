@@ -92,6 +92,12 @@ defmodule SymphonyElixirWeb.DashboardLive do
           </article>
 
           <article class="metric-card">
+            <p class="metric-label">Blocked</p>
+            <p class="metric-value numeric"><%= @payload.counts.blocked %></p>
+            <p class="metric-detail">Issues suppressed until an external change clears the blocker.</p>
+          </article>
+
+          <article class="metric-card">
             <p class="metric-label">Total tokens</p>
             <p class="metric-value numeric"><%= format_int(@payload.codex_totals.total_tokens) %></p>
             <p class="metric-detail numeric">
@@ -244,6 +250,54 @@ defmodule SymphonyElixirWeb.DashboardLive do
                     <td><%= entry.attempt %></td>
                     <td class="mono"><%= entry.due_at || "n/a" %></td>
                     <td><%= entry.error || "n/a" %></td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          <% end %>
+        </section>
+
+        <section class="section-card">
+          <div class="section-header">
+            <div>
+              <h2 class="section-title">Blocked issues</h2>
+              <p class="section-copy">Issues currently suppressed until their state or external prerequisites change.</p>
+            </div>
+          </div>
+
+          <%= if @payload.blocked == [] do %>
+            <p class="empty-state">No issues are currently blocked.</p>
+          <% else %>
+            <div class="table-wrap">
+              <table class="data-table" style="min-width: 880px;">
+                <thead>
+                  <tr>
+                    <th>Issue</th>
+                    <th>State</th>
+                    <th>Reason</th>
+                    <th>Summary</th>
+                    <th>Clearance hint</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr :for={entry <- @payload.blocked}>
+                    <td>
+                      <div class="issue-stack">
+                        <span class="issue-id"><%= entry.issue_identifier %></span>
+                        <div class="issue-links">
+                          <a class="issue-link" href={"/api/v1/#{entry.issue_identifier}"}>JSON details</a>
+                          <a class="issue-link" href={"/issues/#{entry.issue_identifier}"}>Transcript</a>
+                        </div>
+                      </div>
+                    </td>
+                    <td>
+                      <span class={state_badge_class(entry.issue_state || "blocked")}>
+                        <%= entry.issue_state || "blocked" %>
+                      </span>
+                    </td>
+                    <td class="mono"><%= entry.reason_code || "n/a" %></td>
+                    <td><%= entry.summary || "n/a" %></td>
+                    <td><%= entry.clearance_hint || "n/a" %></td>
                   </tr>
                 </tbody>
               </table>

@@ -6,6 +6,15 @@ defmodule SymphonyElixir.PromptBuilder do
   alias SymphonyElixir.{Config, Workflow}
 
   @render_opts [strict_variables: true, strict_filters: true]
+  @unattended_run_contract """
+
+  Symphony unattended run contract:
+
+  - If you hit a true blocker that cannot be resolved inside this unattended run, call the `report_run_outcome` dynamic tool before ending the turn.
+  - Use `status=blocked` with a short `summary`, a stable snake_case `reason_code`, `retryable=false`, and a concrete `clearance_hint`.
+  - Use `status=completed` only when you intentionally want to record a structured completion summary for this turn.
+  - Keep this guidance additive to the workflow instructions above; do not ask a human for follow-up instead of reporting a real blocker.
+  """
 
   @spec build_prompt(SymphonyElixir.Linear.Issue.t(), keyword()) :: String.t()
   def build_prompt(issue, opts \\ []) do
@@ -23,6 +32,7 @@ defmodule SymphonyElixir.PromptBuilder do
       @render_opts
     )
     |> IO.iodata_to_binary()
+    |> append_unattended_run_contract()
   end
 
   defp prompt_template!({:ok, %{prompt_template: prompt}}), do: default_prompt(prompt)
@@ -60,5 +70,9 @@ defmodule SymphonyElixir.PromptBuilder do
     else
       prompt
     end
+  end
+
+  defp append_unattended_run_contract(prompt) when is_binary(prompt) do
+    String.trim_trailing(prompt) <> @unattended_run_contract
   end
 end

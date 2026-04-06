@@ -3,8 +3,32 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
 
   alias SymphonyElixir.Codex.DynamicTool
 
-  test "tool_specs advertises the linear_graphql input contract" do
-    assert [
+  test "tool_specs advertises the run outcome and linear_graphql input contracts" do
+    specs = DynamicTool.tool_specs()
+
+    assert Enum.map(specs, & &1["name"]) == ["report_run_outcome", "linear_graphql"]
+
+    assert Enum.any?(specs, fn
+             %{
+               "description" => description,
+               "inputSchema" => %{
+                 "properties" => %{
+                   "reason_code" => _,
+                   "status" => _,
+                   "summary" => _
+                 },
+                 "required" => ["status", "summary"],
+                 "type" => "object"
+               },
+               "name" => "report_run_outcome"
+             } ->
+               description =~ "Symphony"
+
+             _ ->
+               false
+           end)
+
+    assert Enum.any?(specs, fn
              %{
                "description" => description,
                "inputSchema" => %{
@@ -16,10 +40,12 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
                  "type" => "object"
                },
                "name" => "linear_graphql"
-             }
-           ] = DynamicTool.tool_specs()
+             } ->
+               description =~ "Linear"
 
-    assert description =~ "Linear"
+             _ ->
+               false
+           end)
   end
 
   test "unsupported tools return a failure payload with the supported tool list" do
@@ -30,7 +56,7 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
     assert Jason.decode!(response["output"]) == %{
              "error" => %{
                "message" => ~s(Unsupported dynamic tool: "not_a_real_tool".),
-               "supportedTools" => ["linear_graphql"]
+               "supportedTools" => ["report_run_outcome", "linear_graphql"]
              }
            }
 
@@ -63,6 +89,79 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
     assert response["success"] == true
     assert Jason.decode!(response["output"]) == %{"data" => %{"viewer" => %{"id" => "usr_123"}}}
     assert response["contentItems"] == [%{"type" => "inputText", "text" => response["output"]}]
+  end
+
+  test "report_run_outcome records blocked dispositions through the reporter" do
+    test_pid = self()
+
+    response =
+      DynamicTool.execute(
+        "report_run_outcome",
+        %{
+          "status" => "blocked",
+          "summary" => "Git metadata writes are unavailable in this runtime.",
+          "reason_code" => "git_metadata_writes_unavailable",
+          "retryable" => false,
+          "clearance_hint" => "Run with a runtime that can update Git metadata."
+        },
+        reporter: fn disposition ->
+          send(test_pid, {:reported_disposition, disposition})
+          :ok
+        end
+      )
+
+    assert_received {:reported_disposition, disposition}
+    assert disposition.status == :blocked
+    assert disposition.reason_code == "git_metadata_writes_unavailable"
+    assert disposition.retryable == false
+    assert disposition.clearance_hint =~ "Git metadata"
+    assert response["success"] == true
+
+    assert Jason.decode!(response["output"]) == %{
+             "recorded" => %{
+               "clearanceHint" => "Run with a runtime that can update Git metadata.",
+               "details" => %{},
+               "reasonCode" => "git_metadata_writes_unavailable",
+               "retryable" => false,
+               "status" => "blocked",
+               "summary" => "Git metadata writes are unavailable in this runtime."
+             }
+           }
+  end
+
+  test "report_run_outcome validates blocked reason codes and retryability" do
+    response =
+      DynamicTool.execute(
+        "report_run_outcome",
+        %{
+          "status" => "blocked",
+          "summary" => "Blocked without a reason.",
+          "retryable" => false
+        },
+        reporter: fn _ -> flunk("reporter should not be called for invalid arguments") end
+      )
+
+    assert response["success"] == false
+
+    assert Jason.decode!(response["output"]) == %{
+             "error" => %{
+               "message" => "`report_run_outcome` requires `reason_code` when `status` is `blocked`."
+             }
+           }
+
+    retryable_response =
+      DynamicTool.execute(
+        "report_run_outcome",
+        %{
+          "status" => "blocked",
+          "summary" => "Blocked with invalid retryability.",
+          "reason_code" => "approval_required",
+          "retryable" => true
+        },
+        reporter: fn _ -> flunk("reporter should not be called for invalid retryability") end
+      )
+
+    assert retryable_response["success"] == false
   end
 
   test "linear_graphql strips internal reminder blocks from query and variables" do

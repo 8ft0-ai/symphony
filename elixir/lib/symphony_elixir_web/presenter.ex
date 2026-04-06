@@ -21,9 +21,11 @@ defmodule SymphonyElixirWeb.Presenter do
           generated_at: generated_at,
           counts: %{
             running: length(snapshot.running),
-            retrying: length(snapshot.retrying)
+            retrying: length(snapshot.retrying),
+            blocked: length(Map.get(snapshot, :blocked, []))
           },
           running: Enum.map(snapshot.running, &running_entry_payload/1),
+          blocked: Enum.map(Map.get(snapshot, :blocked, []), &blocked_entry_payload/1),
           retrying: Enum.map(snapshot.retrying, &retry_entry_payload/1),
           codex_totals: snapshot.codex_totals,
           rate_limits: snapshot.rate_limits
@@ -40,8 +42,8 @@ defmodule SymphonyElixirWeb.Presenter do
   @spec issue_payload(String.t(), GenServer.name(), timeout()) :: {:ok, map()} | {:error, :issue_not_found}
   def issue_payload(issue_identifier, orchestrator, snapshot_timeout_ms) when is_binary(issue_identifier) do
     case snapshot_issue_entries(issue_identifier, orchestrator, snapshot_timeout_ms) do
-      {:ok, running, retry} ->
-        {:ok, issue_payload_body(issue_identifier, running, retry)}
+      {:ok, running, blocked, retry} ->
+        {:ok, issue_payload_body(issue_identifier, running, blocked, retry)}
 
       {:error, :issue_not_found} ->
         {:error, :issue_not_found}
@@ -54,12 +56,13 @@ defmodule SymphonyElixirWeb.Presenter do
       when is_binary(issue_identifier) do
     issue_entries =
       case snapshot_issue_entries(issue_identifier, orchestrator, snapshot_timeout_ms) do
-        {:ok, running, retry} -> {running, retry}
-        {:error, :issue_not_found} -> {nil, nil}
+        {:ok, running, blocked, retry} -> {running, blocked, retry}
+        {:error, :issue_not_found} -> {nil, nil, nil}
       end
 
     running = elem(issue_entries, 0)
-    retry = elem(issue_entries, 1)
+    blocked = elem(issue_entries, 1)
+    retry = elem(issue_entries, 2)
 
     with {:ok, sessions} <- TranscriptStore.list_issue_sessions(issue_identifier),
          {:ok, recent_events} <- TranscriptStore.recent_events(issue_identifier) do
@@ -67,13 +70,40 @@ defmodule SymphonyElixirWeb.Presenter do
 
       cond do
         TranscriptStore.transcripts_enabled?() == false ->
-          transcript_ok(issue_identifier, running, retry, sessions, paged_sessions, sessions_page, recent_events)
+          transcript_ok(
+            issue_identifier,
+            running,
+            blocked,
+            retry,
+            sessions,
+            paged_sessions,
+            sessions_page,
+            recent_events
+          )
 
         sessions != [] ->
-          transcript_ok(issue_identifier, running, retry, sessions, paged_sessions, sessions_page, recent_events)
+          transcript_ok(
+            issue_identifier,
+            running,
+            blocked,
+            retry,
+            sessions,
+            paged_sessions,
+            sessions_page,
+            recent_events
+          )
 
-        not is_nil(running) or not is_nil(retry) ->
-          transcript_ok(issue_identifier, running, retry, sessions, paged_sessions, sessions_page, recent_events)
+        not is_nil(running) or not is_nil(blocked) or not is_nil(retry) ->
+          transcript_ok(
+            issue_identifier,
+            running,
+            blocked,
+            retry,
+            sessions,
+            paged_sessions,
+            sessions_page,
+            recent_events
+          )
 
         true ->
           {:error, :issue_not_found}
@@ -81,6 +111,7 @@ defmodule SymphonyElixirWeb.Presenter do
     else
       {:error, reason} ->
         Logger.warning("Transcript payload read failed issue_identifier=#{issue_identifier}: #{inspect(reason)}")
+
         {:error, :issue_not_found}
     end
   end
@@ -128,23 +159,24 @@ defmodule SymphonyElixirWeb.Presenter do
     end
   end
 
-  defp issue_payload_body(issue_identifier, running, retry) do
+  defp issue_payload_body(issue_identifier, running, blocked, retry) do
     sessions = transcript_sessions(issue_identifier)
     recent_events = transcript_recent_events(issue_identifier)
 
     %{
       issue_identifier: issue_identifier,
-      issue_id: issue_id_from_entries(running, retry),
-      status: issue_status(running, retry),
+      issue_id: issue_id_from_entries(running, blocked, retry),
+      status: issue_status(running, blocked, retry),
       workspace: %{
-        path: workspace_path(issue_identifier, running, retry),
-        host: workspace_host(running, retry)
+        path: workspace_path(issue_identifier, running, blocked, retry),
+        host: workspace_host(running, blocked, retry)
       },
       attempts: %{
         restart_count: restart_count(retry),
         current_retry_attempt: retry_attempt(retry)
       },
       running: running && running_issue_payload(running),
+      blocked: blocked && blocked_issue_payload(blocked),
       retry: retry && retry_issue_payload(retry),
       logs: %{
         codex_session_logs: transcript_log_entries(issue_identifier, sessions)
@@ -156,7 +188,7 @@ defmodule SymphonyElixirWeb.Presenter do
         issue_ui_url: issue_ui_url(issue_identifier),
         recent_events_limit: TranscriptStore.recent_events_limit()
       },
-      last_error: retry && retry.error,
+      last_error: (blocked && blocked.summary) || (retry && retry.error),
       tracked: %{}
     }
   end
@@ -164,6 +196,7 @@ defmodule SymphonyElixirWeb.Presenter do
   defp transcript_payload_body(
          issue_identifier,
          running,
+         blocked,
          retry,
          all_sessions,
          sessions,
@@ -172,8 +205,8 @@ defmodule SymphonyElixirWeb.Presenter do
        ) do
     %{
       issue_identifier: issue_identifier,
-      issue_id: issue_id_from_entries(running, retry) || issue_id_from_sessions(all_sessions),
-      status: transcript_status(running, retry, all_sessions),
+      issue_id: issue_id_from_entries(running, blocked, retry) || issue_id_from_sessions(all_sessions),
+      status: transcript_status(running, blocked, retry, all_sessions),
       enabled: TranscriptStore.transcripts_enabled?(),
       transcript_url: transcript_url(issue_identifier),
       issue_ui_url: issue_ui_url(issue_identifier),
@@ -184,16 +217,17 @@ defmodule SymphonyElixirWeb.Presenter do
     }
   end
 
-  defp issue_id_from_entries(running, retry),
-    do: (running && running.issue_id) || (retry && retry.issue_id)
+  defp issue_id_from_entries(running, blocked, retry),
+    do: (running && running.issue_id) || (blocked && blocked.issue_id) || (retry && retry.issue_id)
 
   defp restart_count(retry), do: max(retry_attempt(retry) - 1, 0)
   defp retry_attempt(nil), do: 0
   defp retry_attempt(retry), do: retry.attempt || 0
 
-  defp issue_status(_running, nil), do: "running"
-  defp issue_status(nil, _retry), do: "retrying"
-  defp issue_status(_running, _retry), do: "running"
+  defp issue_status(_running, blocked, _retry) when not is_nil(blocked), do: "blocked"
+  defp issue_status(running, _blocked, _retry) when not is_nil(running), do: "running"
+  defp issue_status(_running, _blocked, retry) when not is_nil(retry), do: "retrying"
+  defp issue_status(_running, _blocked, _retry), do: "unknown"
 
   defp running_entry_payload(entry) do
     %{
@@ -232,6 +266,25 @@ defmodule SymphonyElixirWeb.Presenter do
     }
   end
 
+  defp blocked_entry_payload(entry) do
+    %{
+      issue_id: entry.issue_id,
+      issue_identifier: entry.identifier,
+      reason_code: entry.reason_code,
+      summary: entry.summary,
+      clearance_hint: entry.clearance_hint,
+      blocked_at: iso8601(entry.blocked_at),
+      issue_state: entry.issue_state,
+      issue_updated_at: iso8601(entry.issue_updated_at),
+      transcript_url: transcript_url(entry.identifier),
+      issue_ui_url: issue_ui_url(entry.identifier),
+      worker_host: Map.get(entry, :worker_host),
+      workspace_path: Map.get(entry, :workspace_path),
+      retryable: Map.get(entry, :retryable, false),
+      details: Map.get(entry, :details, %{})
+    }
+  end
+
   defp running_issue_payload(running) do
     %{
       worker_host: Map.get(running, :worker_host),
@@ -261,14 +314,32 @@ defmodule SymphonyElixirWeb.Presenter do
     }
   end
 
-  defp workspace_path(issue_identifier, running, retry) do
+  defp blocked_issue_payload(blocked) do
+    %{
+      reason_code: blocked.reason_code,
+      summary: blocked.summary,
+      clearance_hint: blocked.clearance_hint,
+      blocked_at: iso8601(blocked.blocked_at),
+      issue_state: blocked.issue_state,
+      issue_updated_at: iso8601(blocked.issue_updated_at),
+      worker_host: Map.get(blocked, :worker_host),
+      workspace_path: Map.get(blocked, :workspace_path),
+      retryable: Map.get(blocked, :retryable, false),
+      details: Map.get(blocked, :details, %{})
+    }
+  end
+
+  defp workspace_path(issue_identifier, running, blocked, retry) do
     (running && Map.get(running, :workspace_path)) ||
+      (blocked && Map.get(blocked, :workspace_path)) ||
       (retry && Map.get(retry, :workspace_path)) ||
       Path.join(Config.settings!().workspace.root, issue_identifier)
   end
 
-  defp workspace_host(running, retry) do
-    (running && Map.get(running, :worker_host)) || (retry && Map.get(retry, :worker_host))
+  defp workspace_host(running, blocked, retry) do
+    (running && Map.get(running, :worker_host)) ||
+      (blocked && Map.get(blocked, :worker_host)) ||
+      (retry && Map.get(retry, :worker_host))
   end
 
   defp transcript_sessions(issue_identifier) do
@@ -356,14 +427,16 @@ defmodule SymphonyElixirWeb.Presenter do
 
   defp issue_id_from_sessions(_sessions), do: nil
 
-  defp transcript_status(running, _retry, _sessions) when not is_nil(running), do: "running"
-  defp transcript_status(_running, retry, _sessions) when not is_nil(retry), do: "retrying"
-  defp transcript_status(_running, _retry, sessions) when sessions != [], do: "completed"
-  defp transcript_status(_running, _retry, _sessions), do: "unknown"
+  defp transcript_status(running, _blocked, _retry, _sessions) when not is_nil(running), do: "running"
+  defp transcript_status(_running, blocked, _retry, _sessions) when not is_nil(blocked), do: "blocked"
+  defp transcript_status(_running, _blocked, retry, _sessions) when not is_nil(retry), do: "retrying"
+  defp transcript_status(_running, _blocked, _retry, sessions) when sessions != [], do: "completed"
+  defp transcript_status(_running, _blocked, _retry, _sessions), do: "unknown"
 
   defp transcript_ok(
          issue_identifier,
          running,
+         blocked,
          retry,
          all_sessions,
          sessions,
@@ -374,6 +447,7 @@ defmodule SymphonyElixirWeb.Presenter do
      transcript_payload_body(
        issue_identifier,
        running,
+       blocked,
        retry,
        all_sessions,
        sessions,
@@ -423,12 +497,13 @@ defmodule SymphonyElixirWeb.Presenter do
     case Orchestrator.snapshot(orchestrator, snapshot_timeout_ms) do
       %{} = snapshot ->
         running = Enum.find(snapshot.running, &(&1.identifier == issue_identifier))
+        blocked = Enum.find(Map.get(snapshot, :blocked, []), &(&1.identifier == issue_identifier))
         retry = Enum.find(snapshot.retrying, &(&1.identifier == issue_identifier))
 
-        if is_nil(running) and is_nil(retry) do
+        if is_nil(running) and is_nil(blocked) and is_nil(retry) do
           {:error, :issue_not_found}
         else
-          {:ok, running, retry}
+          {:ok, running, blocked, retry}
         end
 
       _ ->

@@ -314,6 +314,7 @@ defmodule SymphonyElixir.StatusDashboard do
           {:ok,
            %{
              running: running,
+             blocked: Map.get(snapshot, :blocked, []),
              retrying: retrying,
              codex_totals: codex_totals,
              rate_limits: Map.get(snapshot, :rate_limits),
@@ -333,6 +334,7 @@ defmodule SymphonyElixir.StatusDashboard do
   defp format_snapshot_content(snapshot_data, tps, terminal_columns_override \\ nil) do
     case snapshot_data do
       {:ok, %{running: running, retrying: retrying, codex_totals: codex_totals} = snapshot} ->
+        blocked = Map.get(snapshot, :blocked, [])
         rate_limits = Map.get(snapshot, :rate_limits)
         project_link_lines = format_project_link_lines()
         project_refresh_line = format_project_refresh_line(Map.get(snapshot, :polling))
@@ -346,6 +348,8 @@ defmodule SymphonyElixir.StatusDashboard do
         running_rows = format_running_rows(running, running_event_width)
         running_to_backoff_spacer = if(running == [], do: [], else: ["│"])
         backoff_rows = format_retry_rows(retrying)
+        blocked_rows = format_blocked_rows(blocked)
+        backoff_to_blocked_spacer = if(retrying == [], do: [], else: ["│"])
 
         ([
            colorize("╭─ SYMPHONY STATUS", @ansi_bold),
@@ -374,6 +378,9 @@ defmodule SymphonyElixir.StatusDashboard do
            running_to_backoff_spacer ++
            [colorize("├─ Backoff queue", @ansi_bold), "│"] ++
            backoff_rows ++
+           backoff_to_blocked_spacer ++
+           [colorize("├─ Blocked issues", @ansi_bold), "│"] ++
+           blocked_rows ++
            [closing_border()])
         |> List.flatten()
         |> Enum.join("\n")
@@ -559,6 +566,7 @@ defmodule SymphonyElixir.StatusDashboard do
           {:ok,
            %{
              running: running,
+             blocked: Map.get(snapshot, :blocked, []),
              retrying: retrying,
              codex_totals: codex_totals,
              rate_limits: Map.get(snapshot, :rate_limits),
@@ -653,6 +661,39 @@ defmodule SymphonyElixir.StatusDashboard do
       |> Enum.sort_by(& &1.due_in_ms)
       |> Enum.map_join(", ", &format_retry_summary/1)
       |> String.split(", ")
+    end
+  end
+
+  defp format_blocked_rows(blocked) do
+    if blocked == [] do
+      ["│  " <> colorize("No blocked issues", @ansi_gray)]
+    else
+      blocked
+      |> Enum.sort_by(&{Map.get(&1, :identifier) || "", Map.get(&1, :reason_code) || ""})
+      |> Enum.map(&format_blocked_row/1)
+    end
+  end
+
+  defp format_blocked_row(entry) do
+    identifier = Map.get(entry, :identifier) || "unknown"
+    reason_code = Map.get(entry, :reason_code) || "blocked"
+    summary = Map.get(entry, :summary) || "blocked"
+
+    "│  #{colorize("!", @ansi_red)} " <>
+      colorize(identifier, @ansi_red) <>
+      " " <>
+      colorize(reason_code, @ansi_yellow) <>
+      " " <>
+      colorize(truncate(summary, 96), @ansi_cyan) <> blocked_row_hint_suffix(entry)
+  end
+
+  defp blocked_row_hint_suffix(entry) do
+    clearance_hint = Map.get(entry, :clearance_hint)
+
+    if is_binary(clearance_hint) and String.trim(clearance_hint) != "" do
+      colorize(" hint=#{truncate(clearance_hint, 72)}", @ansi_dim)
+    else
+      ""
     end
   end
 
@@ -1144,6 +1185,24 @@ defmodule SymphonyElixir.StatusDashboard do
 
   defp humanize_codex_event(:tool_call_failed, _message, payload),
     do: humanize_dynamic_tool_event("dynamic tool call failed", payload)
+
+  defp humanize_codex_event(:run_outcome_reported, message, _payload) do
+    disposition = map_value(message, ["disposition", :disposition]) || %{}
+    status = map_value(disposition, ["status", :status]) || "reported"
+    summary = map_value(disposition, ["summary", :summary])
+    reason_code = map_value(disposition, ["reason_code", :reason_code])
+
+    base =
+      case {status, reason_code} do
+        {status, reason} when is_binary(reason) ->
+          "run outcome reported (#{status}/#{reason})"
+
+        {status, _reason} ->
+          "run outcome reported (#{status})"
+      end
+
+    if is_binary(summary), do: "#{base}: #{inline_text(summary)}", else: base
+  end
 
   defp humanize_codex_event(:unsupported_tool_call, _message, payload),
     do: humanize_dynamic_tool_event("unsupported dynamic tool call rejected", payload)
