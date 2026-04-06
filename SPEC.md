@@ -1489,7 +1489,7 @@ Minimum endpoints:
         "codex_session_logs": [
           {
             "label": "latest",
-            "path": "/var/log/symphony/log/codex_sessions/issues/MT-649/thread-1-turn-1.ndjson",
+            "path": "issues/MT-649/thread-1-turn-1.ndjson",
             "url": "/api/v1/sessions/thread-1-turn-1.ndjson"
           }
         ]
@@ -1523,6 +1523,9 @@ Minimum endpoints:
   - Returns persisted transcript/session summaries for the issue plus recent events.
   - This endpoint is especially useful when the issue is no longer active in memory but a durable
     transcript manifest still exists.
+  - Recommended query parameters:
+    - `session_limit` to bound how many session summaries are returned
+    - `session_cursor` as an offset into the full session list
   - Suggested response shape:
 
     ```json
@@ -1533,6 +1536,7 @@ Minimum endpoints:
       "enabled": true,
       "transcript_url": "/api/v1/MT-649/transcript",
       "issue_ui_url": "/issues/MT-649",
+      "session_count": 37,
       "sessions": [
         {
           "session_id": "thread-1-turn-1",
@@ -1544,11 +1548,17 @@ Minimum endpoints:
           "event_count": 37,
           "label": "latest",
           "latest": true,
-          "path": "/var/log/symphony/log/codex_sessions/issues/MT-649/thread-1-turn-1.ndjson",
+          "path": "issues/MT-649/thread-1-turn-1.ndjson",
           "url": "/api/v1/sessions/thread-1-turn-1",
           "ndjson_url": "/api/v1/sessions/thread-1-turn-1.ndjson"
         }
       ],
+      "sessions_page": {
+        "limit": 100,
+        "cursor": null,
+        "next_cursor": 100,
+        "has_more": true
+      },
       "recent_events": [
         {
           "ts": "2026-02-24T20:14:59Z",
@@ -1598,6 +1608,8 @@ Minimum endpoints:
 
 - `GET /api/v1/sessions/<session_id>.ndjson`
   - Returns the raw persisted NDJSON transcript for download or streaming.
+  - Implementations should prefer streaming or sendfile-style delivery from disk rather than
+    buffering the entire transcript in memory before responding.
   - If transcript persistence is disabled, implementations may return an empty body together with
     explicit status metadata (for example a response header indicating transcripts are disabled).
 

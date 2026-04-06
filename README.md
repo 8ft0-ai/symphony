@@ -44,6 +44,9 @@ inspection surface when started with `--port`.
 - Summary and control API: `/api/v1/state`, `/api/v1/<issue_identifier>`, `/api/v1/refresh`
 - Transcript APIs: `/api/v1/<issue_identifier>/transcript`,
   `/api/v1/sessions/<session_id>`, and `/api/v1/sessions/<session_id>.ndjson`
+- Issue transcript listings accept `session_limit` and `session_cursor` query parameters so
+  long retry histories do not return an unbounded session list.
+- Session NDJSON downloads are served directly from disk rather than buffered into memory first.
 
 Per-session transcript files are stored as NDJSON outside per-issue workspaces so they survive
 workspace cleanup. By default they live under `./log/codex_sessions`. If you start Symphony with

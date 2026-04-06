@@ -8,6 +8,9 @@ defmodule SymphonyElixirWeb.Presenter do
   alias SymphonyElixir.{Config, Orchestrator, StatusDashboard}
   alias SymphonyElixir.TranscriptStore
 
+  @default_transcript_session_limit 100
+  @max_transcript_session_limit 500
+
   @spec state_payload(GenServer.name(), timeout()) :: map()
   def state_payload(orchestrator, snapshot_timeout_ms) do
     generated_at = DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601()
@@ -45,8 +48,10 @@ defmodule SymphonyElixirWeb.Presenter do
     end
   end
 
-  @spec transcript_payload(String.t(), GenServer.name(), timeout()) :: {:ok, map()} | {:error, :issue_not_found}
-  def transcript_payload(issue_identifier, orchestrator, snapshot_timeout_ms) when is_binary(issue_identifier) do
+  @spec transcript_payload(String.t(), GenServer.name(), timeout(), keyword()) ::
+          {:ok, map()} | {:error, :issue_not_found}
+  def transcript_payload(issue_identifier, orchestrator, snapshot_timeout_ms, opts \\ [])
+      when is_binary(issue_identifier) do
     issue_entries =
       case snapshot_issue_entries(issue_identifier, orchestrator, snapshot_timeout_ms) do
         {:ok, running, retry} -> {running, retry}
@@ -58,15 +63,17 @@ defmodule SymphonyElixirWeb.Presenter do
 
     with {:ok, sessions} <- TranscriptStore.list_issue_sessions(issue_identifier),
          {:ok, recent_events} <- TranscriptStore.recent_events(issue_identifier) do
+      {paged_sessions, sessions_page} = paginate_transcript_sessions(sessions, opts)
+
       cond do
         TranscriptStore.transcripts_enabled?() == false ->
-          {:ok, transcript_payload_body(issue_identifier, running, retry, sessions, recent_events)}
+          transcript_ok(issue_identifier, running, retry, sessions, paged_sessions, sessions_page, recent_events)
 
         sessions != [] ->
-          {:ok, transcript_payload_body(issue_identifier, running, retry, sessions, recent_events)}
+          transcript_ok(issue_identifier, running, retry, sessions, paged_sessions, sessions_page, recent_events)
 
         not is_nil(running) or not is_nil(retry) ->
-          {:ok, transcript_payload_body(issue_identifier, running, retry, sessions, recent_events)}
+          transcript_ok(issue_identifier, running, retry, sessions, paged_sessions, sessions_page, recent_events)
 
         true ->
           {:error, :issue_not_found}
@@ -106,36 +113,6 @@ defmodule SymphonyElixirWeb.Presenter do
 
       {:error, reason} ->
         Logger.warning("Transcript session payload read failed session_id=#{session_id}: #{inspect(reason)}")
-        {:error, :session_not_found}
-    end
-  end
-
-  @spec session_ndjson_payload(String.t()) :: {:ok, map()} | {:error, :session_not_found}
-  def session_ndjson_payload(session_id) when is_binary(session_id) do
-    case TranscriptStore.read_session_ndjson(session_id) do
-      {:ok, %{content: content, issue_identifier: issue_identifier, session: nil}} ->
-        {:ok,
-         %{
-           enabled: TranscriptStore.transcripts_enabled?(),
-           content: content,
-           issue_identifier: issue_identifier,
-           session: nil
-         }}
-
-      {:ok, %{content: content, issue_identifier: issue_identifier, session: session}} ->
-        {:ok,
-         %{
-           enabled: TranscriptStore.transcripts_enabled?(),
-           content: content,
-           issue_identifier: issue_identifier,
-           session: transcript_session_payload(session, issue_identifier, false)
-         }}
-
-      {:error, :session_not_found} ->
-        {:error, :session_not_found}
-
-      {:error, reason} ->
-        Logger.warning("Transcript NDJSON read failed session_id=#{session_id}: #{inspect(reason)}")
         {:error, :session_not_found}
     end
   end
@@ -184,15 +161,25 @@ defmodule SymphonyElixirWeb.Presenter do
     }
   end
 
-  defp transcript_payload_body(issue_identifier, running, retry, sessions, recent_events) do
+  defp transcript_payload_body(
+         issue_identifier,
+         running,
+         retry,
+         all_sessions,
+         sessions,
+         sessions_page,
+         recent_events
+       ) do
     %{
       issue_identifier: issue_identifier,
-      issue_id: issue_id_from_entries(running, retry) || issue_id_from_sessions(sessions),
-      status: transcript_status(running, retry, sessions),
+      issue_id: issue_id_from_entries(running, retry) || issue_id_from_sessions(all_sessions),
+      status: transcript_status(running, retry, all_sessions),
       enabled: TranscriptStore.transcripts_enabled?(),
       transcript_url: transcript_url(issue_identifier),
       issue_ui_url: issue_ui_url(issue_identifier),
+      session_count: length(all_sessions),
       sessions: transcript_session_payloads(sessions, issue_identifier),
+      sessions_page: sessions_page,
       recent_events: recent_events
     }
   end
@@ -355,7 +342,7 @@ defmodule SymphonyElixirWeb.Presenter do
       "last_event_at" => session["last_event_at"],
       "label" => if(latest?, do: "latest", else: session["session_id"]),
       "latest" => latest?,
-      "path" => TranscriptStore.session_path(issue_identifier, session),
+      "path" => TranscriptStore.relative_session_path(issue_identifier, session),
       "url" => session_url(session["session_id"]),
       "ndjson_url" => session_ndjson_url(session["session_id"])
     }
@@ -373,6 +360,64 @@ defmodule SymphonyElixirWeb.Presenter do
   defp transcript_status(_running, retry, _sessions) when not is_nil(retry), do: "retrying"
   defp transcript_status(_running, _retry, sessions) when sessions != [], do: "completed"
   defp transcript_status(_running, _retry, _sessions), do: "unknown"
+
+  defp transcript_ok(
+         issue_identifier,
+         running,
+         retry,
+         all_sessions,
+         sessions,
+         sessions_page,
+         recent_events
+       ) do
+    {:ok,
+     transcript_payload_body(
+       issue_identifier,
+       running,
+       retry,
+       all_sessions,
+       sessions,
+       sessions_page,
+       recent_events
+     )}
+  end
+
+  defp paginate_transcript_sessions(sessions, opts) do
+    limit =
+      opts
+      |> Keyword.get(:session_limit, @default_transcript_session_limit)
+      |> normalize_transcript_session_limit()
+
+    cursor =
+      opts
+      |> Keyword.get(:session_cursor)
+      |> normalize_transcript_session_cursor()
+
+    page_sessions =
+      sessions
+      |> Enum.drop(cursor)
+      |> Enum.take(limit)
+
+    has_more = length(sessions) > cursor + length(page_sessions)
+
+    page = %{
+      limit: limit,
+      cursor: if(cursor == 0, do: nil, else: cursor),
+      next_cursor: if(has_more, do: cursor + length(page_sessions), else: nil),
+      has_more: has_more
+    }
+
+    {page_sessions, page}
+  end
+
+  defp normalize_transcript_session_limit(limit) when is_integer(limit) do
+    min(max(limit, 1), @max_transcript_session_limit)
+  end
+
+  defp normalize_transcript_session_limit(_limit), do: @default_transcript_session_limit
+
+  defp normalize_transcript_session_cursor(cursor) when is_integer(cursor) and cursor >= 0, do: cursor
+  defp normalize_transcript_session_cursor(_cursor), do: 0
 
   defp snapshot_issue_entries(issue_identifier, orchestrator, snapshot_timeout_ms) do
     case Orchestrator.snapshot(orchestrator, snapshot_timeout_ms) do

@@ -71,9 +71,11 @@ defmodule SymphonyElixir.AgentRunner do
   end
 
   defp next_transcript_context(context_key, workspace_context, message) do
+    # Keep a per-handler transcript context in the process dictionary so
+    # session/thread/turn identifiers discovered on early events are available
+    # to later events in the same turn.
     updated_context =
-      context_key
-      |> Process.get(workspace_context)
+      Process.get(context_key, workspace_context)
       |> maybe_put_context_value(:session_id, message[:session_id])
       |> maybe_put_context_value(:thread_id, message[:thread_id])
       |> maybe_put_context_value(:turn_id, message[:turn_id])
@@ -93,7 +95,7 @@ defmodule SymphonyElixir.AgentRunner do
     {:transcript_context, self(), identifier}
   end
 
-  defp transcript_context_key(_issue), do: {:transcript_context, self()}
+  defp transcript_context_key(_issue), do: {:transcript_context, self(), make_ref()}
 
   defp send_codex_update(recipient, %Issue{id: issue_id}, message)
        when is_binary(issue_id) and is_pid(recipient) do

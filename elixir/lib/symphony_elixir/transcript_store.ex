@@ -51,6 +51,12 @@ defmodule SymphonyElixir.TranscriptStore do
     Path.join(issue_directory(issue_identifier), @manifest_filename)
   end
 
+  @spec relative_session_path(String.t(), map()) :: Path.t()
+  def relative_session_path(issue_identifier, %{"file_name" => file_name})
+      when is_binary(issue_identifier) and is_binary(file_name) do
+    Path.join([@issues_dir, safe_path_component(issue_identifier), file_name])
+  end
+
   @spec append(Issue.t() | map(), map(), map()) :: :ok | {:error, term()}
   def append(issue, workspace_context, message) when is_map(issue) and is_map(workspace_context) and is_map(message) do
     if transcripts_enabled?() do

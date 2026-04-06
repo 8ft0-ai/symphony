@@ -92,8 +92,13 @@ defmodule SymphonyElixirWeb.IssueLive do
 
           <article class="metric-card">
             <p class="metric-label">Sessions</p>
-            <p class="metric-value numeric"><%= length(@payload.transcript.sessions) %></p>
-            <p class="metric-detail">Persisted Codex turns retained for this issue.</p>
+            <p class="metric-value numeric"><%= @payload.transcript.session_count || length(@payload.transcript.sessions) %></p>
+            <p class="metric-detail">
+              Persisted Codex turns retained for this issue.
+              <%= if @payload.transcript.sessions_page[:has_more] do %>
+                Showing the latest <%= length(@payload.transcript.sessions) %> sessions on this page.
+              <% end %>
+            </p>
           </article>
 
           <article class="metric-card">
@@ -268,7 +273,14 @@ defmodule SymphonyElixirWeb.IssueLive do
           error: %{code: "issue_not_found", message: "Issue not found"},
           header: %{issue_identifier: issue_identifier, issue_id: nil, status: "unknown"},
           summary: nil,
-          transcript: %{enabled: false, transcript_url: "/api/v1/#{issue_identifier}/transcript", recent_events: [], sessions: []},
+          transcript: %{
+            enabled: false,
+            transcript_url: "/api/v1/#{issue_identifier}/transcript",
+            recent_events: [],
+            sessions: [],
+            session_count: 0,
+            sessions_page: %{has_more: false}
+          },
           selected_session: nil,
           events: [],
           page: %{cursor: nil, next_cursor: nil, has_more: false},

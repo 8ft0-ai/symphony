@@ -400,7 +400,7 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert [log_entry] = issue_payload["logs"]["codex_session_logs"]
     assert log_entry["label"] == "latest"
     assert log_entry["url"] == "/api/v1/sessions/thread-http.ndjson"
-    assert String.ends_with?(log_entry["path"], "/transcripts/issues/MT-HTTP/thread-http.ndjson")
+    assert log_entry["path"] == "issues/MT-HTTP/thread-http.ndjson"
 
     assert Enum.map(issue_payload["recent_events"], & &1["event"]) == [
              "turn_completed",
@@ -417,11 +417,21 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert transcript_payload["enabled"] == true
     assert transcript_payload["transcript_url"] == "/api/v1/MT-HTTP/transcript"
     assert transcript_payload["issue_ui_url"] == "/issues/MT-HTTP"
+    assert transcript_payload["session_count"] == 1
+
+    assert transcript_payload["sessions_page"] == %{
+             "limit" => 100,
+             "cursor" => nil,
+             "next_cursor" => nil,
+             "has_more" => false
+           }
+
     assert [session_payload] = transcript_payload["sessions"]
     assert session_payload["session_id"] == "thread-http"
     assert session_payload["url"] == "/api/v1/sessions/thread-http"
     assert session_payload["ndjson_url"] == "/api/v1/sessions/thread-http.ndjson"
     assert session_payload["event_count"] == 3
+    assert session_payload["path"] == "issues/MT-HTTP/thread-http.ndjson"
 
     conn = get(build_conn(), "/api/v1/sessions/thread-http?limit=2&order=asc")
     session_payload = json_response(conn, 200)
@@ -480,6 +490,18 @@ defmodule SymphonyElixir.ExtensionsTest do
       "thread-http"
     )
 
+    append_test_transcript!(
+      %Issue{id: "issue-http", identifier: "MT-HTTP", title: "HTTP transcript", state: "In Progress"},
+      "thread-http-older",
+      base_time: ~U[2026-04-05 09:00:00Z]
+    )
+
+    append_test_transcript!(
+      %Issue{id: "issue-http", identifier: "MT-HTTP", title: "HTTP transcript", state: "In Progress"},
+      "thread-http-oldest",
+      base_time: ~U[2026-04-05 08:00:00Z]
+    )
+
     start_test_endpoint(orchestrator: orchestrator_name, snapshot_timeout_ms: 50)
 
     assert json_response(get(build_conn(), "/api/v1/sessions/thread-http?limit=bad"), 400) ==
@@ -490,6 +512,36 @@ defmodule SymphonyElixir.ExtensionsTest do
 
     assert json_response(get(build_conn(), "/api/v1/sessions/thread-http?order=sideways"), 400) ==
              %{"error" => %{"code" => "invalid_query_param", "message" => "Invalid order query parameter"}}
+
+    assert json_response(get(build_conn(), "/api/v1/MT-HTTP/transcript?session_limit=bad"), 400) ==
+             %{
+               "error" => %{
+                 "code" => "invalid_query_param",
+                 "message" => "Invalid session_limit query parameter"
+               }
+             }
+
+    assert json_response(get(build_conn(), "/api/v1/MT-HTTP/transcript?session_cursor=-1"), 400) ==
+             %{
+               "error" => %{
+                 "code" => "invalid_query_param",
+                 "message" => "Invalid session_cursor query parameter"
+               }
+             }
+
+    transcript_payload =
+      json_response(get(build_conn(), "/api/v1/MT-HTTP/transcript?session_limit=1&session_cursor=1"), 200)
+
+    assert transcript_payload["session_count"] == 3
+
+    assert transcript_payload["sessions_page"] == %{
+             "limit" => 1,
+             "cursor" => 1,
+             "next_cursor" => 2,
+             "has_more" => true
+           }
+
+    assert Enum.map(transcript_payload["sessions"], & &1["session_id"]) == ["thread-http-older"]
 
     assert json_response(get(build_conn(), "/api/v1/sessions/missing-session"), 404) ==
              %{"error" => %{"code" => "session_not_found", "message" => "Session not found"}}

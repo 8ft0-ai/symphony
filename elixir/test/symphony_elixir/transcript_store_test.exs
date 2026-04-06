@@ -26,6 +26,7 @@ defmodule SymphonyElixir.TranscriptStoreTest do
     assert TranscriptStore.root() == Path.join(logs_root, "log/codex_sessions")
     assert TranscriptStore.issue_directory("MT/401") == Path.join(logs_root, "log/codex_sessions/issues/MT_401")
     assert TranscriptStore.manifest_path("MT/401") == Path.join(logs_root, "log/codex_sessions/issues/MT_401/manifest.json")
+    assert TranscriptStore.relative_session_path("MT/401", %{"file_name" => "thread-1.ndjson"}) == "issues/MT_401/thread-1.ndjson"
   end
 
   test "honors explicit transcript root config outside the workspace root" do
