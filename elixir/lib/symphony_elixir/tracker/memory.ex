@@ -6,6 +6,7 @@ defmodule SymphonyElixir.Tracker.Memory do
   @behaviour SymphonyElixir.Tracker
 
   alias SymphonyElixir.Linear.Issue
+  alias SymphonyElixir.TextSanitizer
 
   @spec fetch_candidate_issues() :: {:ok, [Issue.t()]} | {:error, term()}
   def fetch_candidate_issues do
@@ -37,7 +38,7 @@ defmodule SymphonyElixir.Tracker.Memory do
 
   @spec create_comment(String.t(), String.t()) :: :ok | {:error, term()}
   def create_comment(issue_id, body) do
-    send_event({:memory_tracker_comment, issue_id, body})
+    send_event({:memory_tracker_comment, issue_id, TextSanitizer.sanitize_user_visible_text(body)})
     :ok
   end
 

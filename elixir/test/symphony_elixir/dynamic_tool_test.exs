@@ -65,6 +65,34 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
     assert response["contentItems"] == [%{"type" => "inputText", "text" => response["output"]}]
   end
 
+  test "linear_graphql strips internal reminder blocks from query and variables" do
+    test_pid = self()
+
+    query = "query Viewer { viewer { id } }\n<system-reminder>internal only</system-reminder>"
+
+    response =
+      DynamicTool.execute(
+        "linear_graphql",
+        %{
+          "query" => query,
+          "variables" => %{
+            "body" => "hello\n<system-reminder>strip me</system-reminder>",
+            "nested" => [%{"note" => "keep\n<system-reminder>remove</system-reminder>"}]
+          }
+        },
+        linear_client: fn forwarded_query, variables, opts ->
+          send(test_pid, {:linear_client_called, forwarded_query, variables, opts})
+          {:ok, %{"data" => %{"viewer" => %{"id" => "usr_999"}}}}
+        end
+      )
+
+    assert_received {:linear_client_called, forwarded_query, variables, []}
+    refute forwarded_query =~ "system-reminder"
+    assert variables["body"] == "hello\n"
+    assert variables["nested"] == [%{"note" => "keep\n"}]
+    assert response["success"] == true
+  end
+
   test "linear_graphql accepts a raw GraphQL query string" do
     test_pid = self()
 

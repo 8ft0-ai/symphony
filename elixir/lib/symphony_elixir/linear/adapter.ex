@@ -6,6 +6,7 @@ defmodule SymphonyElixir.Linear.Adapter do
   @behaviour SymphonyElixir.Tracker
 
   alias SymphonyElixir.Linear.Client
+  alias SymphonyElixir.TextSanitizer
 
   @create_comment_mutation """
   mutation SymphonyCreateComment($issueId: String!, $body: String!) {
@@ -48,7 +49,13 @@ defmodule SymphonyElixir.Linear.Adapter do
 
   @spec create_comment(String.t(), String.t()) :: :ok | {:error, term()}
   def create_comment(issue_id, body) when is_binary(issue_id) and is_binary(body) do
-    with {:ok, response} <- client_module().graphql(@create_comment_mutation, %{issueId: issue_id, body: body}),
+    sanitized_body = TextSanitizer.sanitize_user_visible_text(body)
+
+    with {:ok, response} <-
+           client_module().graphql(
+             @create_comment_mutation,
+             %{issueId: issue_id, body: sanitized_body}
+           ),
          true <- get_in(response, ["data", "commentCreate", "success"]) == true do
       :ok
     else
