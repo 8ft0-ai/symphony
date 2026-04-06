@@ -22,6 +22,7 @@ defmodule SymphonyElixir.RunDispositionTest do
     failed = RunDisposition.failed("turn_timeout", %{summary: "Timed out.", retryable: false})
 
     assert RunDisposition.status_values() == ["completed", "blocked", "failed"]
+    assert RunDisposition.default_completed_summary() == "Codex turn completed normally."
 
     assert RunDisposition.known_blocked_reason_codes() == [
              "approval_required",

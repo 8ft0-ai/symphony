@@ -186,7 +186,7 @@ defmodule SymphonyElixir.AgentRunner do
            ) do
       disposition =
         turn_session[:disposition] ||
-          RunDisposition.completed(%{summary: "Codex turn completed normally."})
+          RunDisposition.completed(%{summary: RunDisposition.default_completed_summary()})
 
       Logger.info(
         "Completed agent run for #{issue_context(issue)} " <>

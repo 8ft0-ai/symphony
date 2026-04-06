@@ -28,6 +28,7 @@ defmodule SymphonyElixir.RunDisposition do
           reported_at: DateTime.t() | nil
         }
 
+  @default_completed_summary "Codex turn completed normally."
   @status_values ~w[completed blocked failed]
   @known_blocked_reason_codes ~w[
     approval_required
@@ -52,6 +53,9 @@ defmodule SymphonyElixir.RunDisposition do
 
   @spec known_blocked_reason_codes() :: [String.t()]
   def known_blocked_reason_codes, do: @known_blocked_reason_codes
+
+  @spec default_completed_summary() :: String.t()
+  def default_completed_summary, do: @default_completed_summary
 
   @spec completed(map()) :: t()
   def completed(metadata \\ %{}) when is_map(metadata) do

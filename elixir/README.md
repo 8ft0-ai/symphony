@@ -123,6 +123,9 @@ Notes:
   Symphony validation.
 - `agent.max_turns` caps how many back-to-back Codex turns Symphony will run in a single agent
   invocation when a turn completes normally but the issue is still in an active state. Default: `20`.
+- `tracker.review_dispatch.requires_pr: true` is an opt-in guard for workflows that keep
+  `In Review` in `tracker.active_states`. When enabled, Symphony suppresses dispatch for review
+  issues until the issue includes an attached GitHub pull request URL.
 - If the Markdown body is blank, Symphony uses a default prompt template that includes the issue
   identifier, title, and body.
 - Use `hooks.after_create` to bootstrap a fresh workspace. For a Git-backed repo, you can run

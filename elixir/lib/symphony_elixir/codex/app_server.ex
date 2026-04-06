@@ -112,7 +112,7 @@ defmodule SymphonyElixir.Codex.AppServer do
 
             disposition =
               take_reported_run_outcome() ||
-                RunDisposition.completed(%{summary: "Codex turn completed normally."})
+                RunDisposition.completed(%{summary: RunDisposition.default_completed_summary()})
 
             {:ok,
              %{
@@ -1178,5 +1178,10 @@ defmodule SymphonyElixir.Codex.AppServer do
        do: :ok
 
   defp serialize_reported_run_outcome(%RunDisposition{} = disposition), do: RunDisposition.to_map(disposition)
-  defp serialize_reported_run_outcome(disposition), do: disposition
+  defp serialize_reported_run_outcome(nil), do: nil
+
+  defp serialize_reported_run_outcome(disposition) do
+    Logger.warning("Ignoring unexpected reported run outcome in transcript emission: #{inspect(disposition)}")
+    nil
+  end
 end
