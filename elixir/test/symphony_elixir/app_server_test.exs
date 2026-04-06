@@ -1494,9 +1494,9 @@ defmodule SymphonyElixir.AppServerTest do
                  |> String.trim_leading("JSON:")
                  |> Jason.decode!()
                  |> then(fn payload ->
-                    payload["method"] == "turn/start" &&
-                      Map.has_key?(payload["params"], "cwd") == false &&
-                      get_in(payload, ["params", "sandboxPolicy"]) == expected_turn_policy
+                   payload["method"] == "turn/start" &&
+                     Map.has_key?(payload["params"], "cwd") == false &&
+                     get_in(payload, ["params", "sandboxPolicy"]) == expected_turn_policy
                  end)
                else
                  false
