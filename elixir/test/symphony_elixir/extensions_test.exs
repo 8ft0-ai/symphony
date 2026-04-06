@@ -319,9 +319,10 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert {:error, :issue_update_failed} = Adapter.update_issue_state("issue-1", "Odd")
   end
 
-  test "phoenix observability api preserves state, issue, and refresh responses" do
+  test "phoenix observability api preserves state, issue, refresh, and transcript responses" do
     snapshot = static_snapshot()
     orchestrator_name = Module.concat(__MODULE__, :ObservabilityApiOrchestrator)
+    transcripts_root = Path.join(Path.dirname(Workflow.workflow_file_path()), "transcripts")
 
     {:ok, _pid} =
       StaticOrchestrator.start_link(
@@ -335,80 +336,121 @@ defmodule SymphonyElixir.ExtensionsTest do
         }
       )
 
+    write_workflow_file!(Workflow.workflow_file_path(),
+      observability_transcripts_root: transcripts_root
+    )
+
+    append_test_transcript!(
+      %Issue{id: "issue-http", identifier: "MT-HTTP", title: "HTTP transcript", state: "In Progress"},
+      "thread-http",
+      thread_id: "thread-http",
+      turn_id: "turn-1",
+      workspace_path: "/tmp/symphony-http"
+    )
+
     start_test_endpoint(orchestrator: orchestrator_name, snapshot_timeout_ms: 50)
 
     conn = get(build_conn(), "/api/v1/state")
     state_payload = json_response(conn, 200)
 
-    assert state_payload == %{
-             "generated_at" => state_payload["generated_at"],
-             "counts" => %{"running" => 1, "retrying" => 1},
-             "running" => [
-               %{
-                 "issue_id" => "issue-http",
-                 "issue_identifier" => "MT-HTTP",
-                 "state" => "In Progress",
-                 "worker_host" => nil,
-                 "workspace_path" => nil,
-                 "session_id" => "thread-http",
-                 "turn_count" => 7,
-                 "last_event" => "notification",
-                 "last_message" => "rendered",
-                 "started_at" => state_payload["running"] |> List.first() |> Map.fetch!("started_at"),
-                 "last_event_at" => nil,
-                 "tokens" => %{"input_tokens" => 4, "output_tokens" => 8, "total_tokens" => 12}
-               }
-             ],
-             "retrying" => [
-               %{
-                 "issue_id" => "issue-retry",
-                 "issue_identifier" => "MT-RETRY",
-                 "attempt" => 2,
-                 "due_at" => state_payload["retrying"] |> List.first() |> Map.fetch!("due_at"),
-                 "error" => "boom",
-                 "worker_host" => nil,
-                 "workspace_path" => nil
-               }
-             ],
-             "codex_totals" => %{
-               "input_tokens" => 4,
-               "output_tokens" => 8,
-               "total_tokens" => 12,
-               "seconds_running" => 42.5
-             },
-             "rate_limits" => %{"primary" => %{"remaining" => 11}}
-           }
+    assert state_payload["counts"] == %{"running" => 1, "retrying" => 1}
+    assert state_payload["codex_totals"] == %{"input_tokens" => 4, "output_tokens" => 8, "total_tokens" => 12, "seconds_running" => 42.5}
+    assert state_payload["rate_limits"] == %{"primary" => %{"remaining" => 11}}
+
+    assert [running_entry] = state_payload["running"]
+    assert running_entry["issue_id"] == "issue-http"
+    assert running_entry["issue_identifier"] == "MT-HTTP"
+    assert running_entry["session_id"] == "thread-http"
+    assert running_entry["transcript_url"] == "/api/v1/MT-HTTP/transcript"
+    assert running_entry["issue_ui_url"] == "/issues/MT-HTTP"
+    assert running_entry["last_message"] == "rendered"
+    assert running_entry["tokens"] == %{"input_tokens" => 4, "output_tokens" => 8, "total_tokens" => 12}
+
+    assert [retry_entry] = state_payload["retrying"]
+    assert retry_entry["issue_id"] == "issue-retry"
+    assert retry_entry["issue_identifier"] == "MT-RETRY"
+    assert retry_entry["transcript_url"] == "/api/v1/MT-RETRY/transcript"
+    assert retry_entry["issue_ui_url"] == "/issues/MT-RETRY"
+    assert retry_entry["attempt"] == 2
+    assert retry_entry["error"] == "boom"
 
     conn = get(build_conn(), "/api/v1/MT-HTTP")
     issue_payload = json_response(conn, 200)
 
-    assert issue_payload == %{
-             "issue_identifier" => "MT-HTTP",
-             "issue_id" => "issue-http",
-             "status" => "running",
-             "workspace" => %{
-               "path" => Path.join(Config.settings!().workspace.root, "MT-HTTP"),
-               "host" => nil
-             },
-             "attempts" => %{"restart_count" => 0, "current_retry_attempt" => 0},
-             "running" => %{
-               "worker_host" => nil,
-               "workspace_path" => nil,
-               "session_id" => "thread-http",
-               "turn_count" => 7,
-               "state" => "In Progress",
-               "started_at" => issue_payload["running"]["started_at"],
-               "last_event" => "notification",
-               "last_message" => "rendered",
-               "last_event_at" => nil,
-               "tokens" => %{"input_tokens" => 4, "output_tokens" => 8, "total_tokens" => 12}
-             },
-             "retry" => nil,
-             "logs" => %{"codex_session_logs" => []},
-             "recent_events" => [],
-             "last_error" => nil,
-             "tracked" => %{}
+    assert issue_payload["issue_identifier"] == "MT-HTTP"
+    assert issue_payload["issue_id"] == "issue-http"
+    assert issue_payload["status"] == "running"
+
+    assert issue_payload["workspace"] == %{
+             "path" => Path.join(Config.settings!().workspace.root, "MT-HTTP"),
+             "host" => nil
            }
+
+    assert issue_payload["attempts"] == %{"restart_count" => 0, "current_retry_attempt" => 0}
+    assert issue_payload["running"]["session_id"] == "thread-http"
+    assert issue_payload["running"]["last_message"] == "rendered"
+
+    assert issue_payload["transcripts"] == %{
+             "enabled" => true,
+             "transcript_url" => "/api/v1/MT-HTTP/transcript",
+             "issue_ui_url" => "/issues/MT-HTTP",
+             "recent_events_limit" => 50
+           }
+
+    assert [log_entry] = issue_payload["logs"]["codex_session_logs"]
+    assert log_entry["label"] == "latest"
+    assert log_entry["url"] == "/api/v1/sessions/thread-http.ndjson"
+    assert log_entry["path"] == "issues/MT-HTTP/thread-http.ndjson"
+
+    assert Enum.map(issue_payload["recent_events"], & &1["event"]) == [
+             "turn_completed",
+             "notification",
+             "session_started"
+           ]
+
+    conn = get(build_conn(), "/api/v1/MT-HTTP/transcript")
+    transcript_payload = json_response(conn, 200)
+
+    assert transcript_payload["issue_identifier"] == "MT-HTTP"
+    assert transcript_payload["issue_id"] == "issue-http"
+    assert transcript_payload["status"] == "running"
+    assert transcript_payload["enabled"] == true
+    assert transcript_payload["transcript_url"] == "/api/v1/MT-HTTP/transcript"
+    assert transcript_payload["issue_ui_url"] == "/issues/MT-HTTP"
+    assert transcript_payload["session_count"] == 1
+
+    assert transcript_payload["sessions_page"] == %{
+             "limit" => 100,
+             "cursor" => nil,
+             "next_cursor" => nil,
+             "has_more" => false
+           }
+
+    assert [session_payload] = transcript_payload["sessions"]
+    assert session_payload["session_id"] == "thread-http"
+    assert session_payload["url"] == "/api/v1/sessions/thread-http"
+    assert session_payload["ndjson_url"] == "/api/v1/sessions/thread-http.ndjson"
+    assert session_payload["event_count"] == 3
+    assert session_payload["path"] == "issues/MT-HTTP/thread-http.ndjson"
+
+    conn = get(build_conn(), "/api/v1/sessions/thread-http?limit=2&order=asc")
+    session_payload = json_response(conn, 200)
+
+    assert session_payload["enabled"] == true
+    assert session_payload["issue_identifier"] == "MT-HTTP"
+    assert session_payload["session"]["session_id"] == "thread-http"
+    assert Enum.map(session_payload["events"], & &1["sequence"]) == [1, 2]
+
+    assert session_payload["page"] == %{
+             "limit" => 2,
+             "order" => "asc",
+             "cursor" => nil,
+             "next_cursor" => 2,
+             "has_more" => true
+           }
+
+    conn = get(build_conn(), "/api/v1/sessions/thread-http.ndjson")
+    assert response(conn, 200) =~ "\"session_id\":\"thread-http\""
 
     conn = get(build_conn(), "/api/v1/MT-RETRY")
 
@@ -425,6 +467,89 @@ defmodule SymphonyElixir.ExtensionsTest do
 
     assert %{"queued" => true, "coalesced" => false, "operations" => ["poll", "reconcile"]} =
              json_response(conn, 202)
+  end
+
+  test "phoenix transcript endpoints validate params, preserve route precedence, and return 404s" do
+    snapshot = static_snapshot()
+    orchestrator_name = Module.concat(__MODULE__, :ObservabilityTranscriptValidationOrchestrator)
+    transcripts_root = Path.join(Path.dirname(Workflow.workflow_file_path()), "transcripts-validation")
+
+    {:ok, _pid} =
+      StaticOrchestrator.start_link(
+        name: orchestrator_name,
+        snapshot: snapshot,
+        refresh: :unavailable
+      )
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      observability_transcripts_root: transcripts_root
+    )
+
+    append_test_transcript!(
+      %Issue{id: "issue-http", identifier: "MT-HTTP", title: "HTTP transcript", state: "In Progress"},
+      "thread-http"
+    )
+
+    append_test_transcript!(
+      %Issue{id: "issue-http", identifier: "MT-HTTP", title: "HTTP transcript", state: "In Progress"},
+      "thread-http-older",
+      base_time: ~U[2026-04-05 09:00:00Z]
+    )
+
+    append_test_transcript!(
+      %Issue{id: "issue-http", identifier: "MT-HTTP", title: "HTTP transcript", state: "In Progress"},
+      "thread-http-oldest",
+      base_time: ~U[2026-04-05 08:00:00Z]
+    )
+
+    start_test_endpoint(orchestrator: orchestrator_name, snapshot_timeout_ms: 50)
+
+    assert json_response(get(build_conn(), "/api/v1/sessions/thread-http?limit=bad"), 400) ==
+             %{"error" => %{"code" => "invalid_query_param", "message" => "Invalid limit query parameter"}}
+
+    assert json_response(get(build_conn(), "/api/v1/sessions/thread-http?cursor=-1"), 400) ==
+             %{"error" => %{"code" => "invalid_query_param", "message" => "Invalid cursor query parameter"}}
+
+    assert json_response(get(build_conn(), "/api/v1/sessions/thread-http?order=sideways"), 400) ==
+             %{"error" => %{"code" => "invalid_query_param", "message" => "Invalid order query parameter"}}
+
+    assert json_response(get(build_conn(), "/api/v1/MT-HTTP/transcript?session_limit=bad"), 400) ==
+             %{
+               "error" => %{
+                 "code" => "invalid_query_param",
+                 "message" => "Invalid session_limit query parameter"
+               }
+             }
+
+    assert json_response(get(build_conn(), "/api/v1/MT-HTTP/transcript?session_cursor=-1"), 400) ==
+             %{
+               "error" => %{
+                 "code" => "invalid_query_param",
+                 "message" => "Invalid session_cursor query parameter"
+               }
+             }
+
+    transcript_payload =
+      json_response(get(build_conn(), "/api/v1/MT-HTTP/transcript?session_limit=1&session_cursor=1"), 200)
+
+    assert transcript_payload["session_count"] == 3
+
+    assert transcript_payload["sessions_page"] == %{
+             "limit" => 1,
+             "cursor" => 1,
+             "next_cursor" => 2,
+             "has_more" => true
+           }
+
+    assert Enum.map(transcript_payload["sessions"], & &1["session_id"]) == ["thread-http-older"]
+
+    assert json_response(get(build_conn(), "/api/v1/sessions/missing-session"), 404) ==
+             %{"error" => %{"code" => "session_not_found", "message" => "Session not found"}}
+
+    assert json_response(get(build_conn(), "/api/v1/MT-MISSING/transcript"), 404) ==
+             %{"error" => %{"code" => "issue_not_found", "message" => "Issue not found"}}
+
+    assert response(get(build_conn(), "/api/v1/sessions/thread-http.ndjson"), 200) =~ "\"sequence\":1"
   end
 
   test "phoenix observability api preserves 405, 404, and unavailable behavior" do
@@ -548,6 +673,9 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert html =~ "Offline"
     assert html =~ "Copy ID"
     assert html =~ "Codex update"
+    assert html =~ "/issues/MT-HTTP"
+    assert html =~ "/issues/MT-RETRY"
+    assert html =~ ">Transcript<"
     refute html =~ "data-runtime-clock="
     refute html =~ "setInterval(refreshRuntimeClocks"
     refute html =~ "Refresh now"
@@ -594,6 +722,68 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert_eventually(fn ->
       render(view) =~ "agent message content streaming: structured update"
     end)
+  end
+
+  test "issue transcript liveview renders sessions and switches between them" do
+    orchestrator_name = Module.concat(__MODULE__, :IssueTranscriptLiveOrchestrator)
+    snapshot = static_snapshot()
+    transcripts_root = Path.join(Path.dirname(Workflow.workflow_file_path()), "issue-live-transcripts")
+
+    {:ok, _pid} =
+      StaticOrchestrator.start_link(
+        name: orchestrator_name,
+        snapshot: snapshot,
+        refresh: %{
+          queued: true,
+          coalesced: true,
+          requested_at: DateTime.utc_now(),
+          operations: ["poll"]
+        }
+      )
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      observability_transcripts_root: transcripts_root
+    )
+
+    append_test_transcript!(
+      %Issue{id: "issue-http", identifier: "MT-HTTP", title: "Older transcript", state: "Done"},
+      "thread-http-older",
+      base_time: ~U[2026-04-05 09:00:00Z],
+      delta: "older note",
+      turn_id: "turn-older",
+      workspace_path: "/tmp/older-session"
+    )
+
+    append_test_transcript!(
+      %Issue{id: "issue-http", identifier: "MT-HTTP", title: "Latest transcript", state: "In Progress"},
+      "thread-http",
+      base_time: ~U[2026-04-05 10:00:00Z],
+      delta: "newer note",
+      turn_id: "turn-latest",
+      workspace_path: "/tmp/latest-session"
+    )
+
+    start_test_endpoint(orchestrator: orchestrator_name, snapshot_timeout_ms: 50)
+
+    {:ok, view, html} = live(build_conn(), "/issues/MT-HTTP")
+    assert html =~ "Transcript history"
+    assert html =~ "Issue transcript JSON"
+    assert html =~ "Session NDJSON"
+    assert html =~ "thread-http"
+    assert html =~ "thread-http-older"
+    assert html =~ "newer note"
+    refute html =~ "older note"
+
+    view
+    |> form("#session-selector-form", %{"session_id" => "thread-http-older"})
+    |> render_change()
+
+    assert_patch(view, "/issues/MT-HTTP?session_id=thread-http-older")
+
+    switched_html = render(view)
+    assert switched_html =~ "older note"
+    assert switched_html =~ "/api/v1/sessions/thread-http-older"
+    assert switched_html =~ "/api/v1/sessions/thread-http-older.ndjson"
   end
 
   test "dashboard liveview renders an unavailable state without crashing" do
@@ -714,6 +904,42 @@ defmodule SymphonyElixir.ExtensionsTest do
       codex_totals: %{input_tokens: 4, output_tokens: 8, total_tokens: 12, seconds_running: 42.5},
       rate_limits: %{"primary" => %{"remaining" => 11}}
     }
+  end
+
+  defp append_test_transcript!(issue, session_id, opts \\ []) do
+    base_time = Keyword.get(opts, :base_time, ~U[2026-04-05 09:10:11Z])
+    delta = Keyword.get(opts, :delta, "rendered")
+
+    context = %{
+      workspace_path: Keyword.get(opts, :workspace_path, "/tmp/#{issue.identifier}"),
+      worker_host: Keyword.get(opts, :worker_host),
+      session_id: session_id,
+      thread_id: Keyword.get(opts, :thread_id, session_id),
+      turn_id: Keyword.get(opts, :turn_id, "turn-1")
+    }
+
+    [
+      %{
+        event: :session_started,
+        session_id: session_id,
+        thread_id: context.thread_id,
+        turn_id: context.turn_id,
+        timestamp: base_time
+      },
+      %{
+        event: :notification,
+        payload: %{"method" => "item/agentMessage/delta", "params" => %{"delta" => delta}},
+        timestamp: DateTime.add(base_time, 1, :second)
+      },
+      %{
+        event: :turn_completed,
+        payload: %{"method" => "turn/completed"},
+        timestamp: DateTime.add(base_time, 2, :second)
+      }
+    ]
+    |> Enum.each(fn event ->
+      :ok = TranscriptStore.append(issue, context, event)
+    end)
   end
 
   defp wait_for_bound_port do

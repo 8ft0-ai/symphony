@@ -5,7 +5,7 @@ defmodule SymphonyElixir.AgentRunner do
 
   require Logger
   alias SymphonyElixir.Codex.AppServer
-  alias SymphonyElixir.{Config, Linear.Issue, PromptBuilder, Tracker, Workspace}
+  alias SymphonyElixir.{Config, Linear.Issue, PromptBuilder, Tracker, TranscriptStore, Workspace}
 
   @type worker_host :: String.t() | nil
 
@@ -46,11 +46,56 @@ defmodule SymphonyElixir.AgentRunner do
     end
   end
 
-  defp codex_message_handler(recipient, issue) do
+  defp codex_message_handler(recipient, issue, workspace_context) do
+    context_key = transcript_context_key(issue)
+    Process.put(context_key, workspace_context)
+
     fn message ->
+      persist_transcript_event(issue, context_key, workspace_context, message)
       send_codex_update(recipient, issue, message)
     end
   end
+
+  defp persist_transcript_event(issue, context_key, workspace_context, message) do
+    transcript_context = next_transcript_context(context_key, workspace_context, message)
+
+    case TranscriptStore.append(issue, transcript_context, message) do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning("Transcript persistence failed for #{issue_context(issue)} event=#{inspect(message[:event])}: #{inspect(reason)}")
+
+        :ok
+    end
+  end
+
+  defp next_transcript_context(context_key, workspace_context, message) do
+    # Keep a per-handler transcript context in the process dictionary so
+    # session/thread/turn identifiers discovered on early events are available
+    # to later events in the same turn.
+    updated_context =
+      Process.get(context_key, workspace_context)
+      |> maybe_put_context_value(:session_id, message[:session_id])
+      |> maybe_put_context_value(:thread_id, message[:thread_id])
+      |> maybe_put_context_value(:turn_id, message[:turn_id])
+
+    Process.put(context_key, updated_context)
+    updated_context
+  end
+
+  defp maybe_put_context_value(context, _key, value) when value in [nil, ""], do: context
+  defp maybe_put_context_value(context, key, value), do: Map.put(context, key, value)
+
+  defp transcript_context_key(%Issue{id: issue_id}) when is_binary(issue_id) do
+    {:transcript_context, self(), issue_id}
+  end
+
+  defp transcript_context_key(%Issue{identifier: identifier}) when is_binary(identifier) do
+    {:transcript_context, self(), identifier}
+  end
+
+  defp transcript_context_key(_issue), do: {:transcript_context, self(), make_ref()}
 
   defp send_codex_update(recipient, %Issue{id: issue_id}, message)
        when is_binary(issue_id) and is_pid(recipient) do
@@ -80,44 +125,65 @@ defmodule SymphonyElixir.AgentRunner do
     max_turns = Keyword.get(opts, :max_turns, Config.settings!().agent.max_turns)
     issue_state_fetcher = Keyword.get(opts, :issue_state_fetcher, &Tracker.fetch_issue_states_by_ids/1)
 
+    turn_context = %{
+      workspace: workspace,
+      codex_update_recipient: codex_update_recipient,
+      opts: opts,
+      issue_state_fetcher: issue_state_fetcher,
+      worker_host: worker_host,
+      max_turns: max_turns
+    }
+
     with {:ok, session} <- AppServer.start_session(workspace, worker_host: worker_host) do
       try do
-        do_run_codex_turns(session, workspace, issue, codex_update_recipient, opts, issue_state_fetcher, 1, max_turns)
+        do_run_codex_turns(session, issue, turn_context, 1)
       after
         AppServer.stop_session(session)
       end
     end
   end
 
-  defp do_run_codex_turns(app_session, workspace, issue, codex_update_recipient, opts, issue_state_fetcher, turn_number, max_turns) do
-    prompt = build_turn_prompt(issue, opts, turn_number, max_turns)
+  defp do_run_codex_turns(app_session, issue, turn_context, turn_number) do
+    prompt =
+      build_turn_prompt(
+        issue,
+        turn_context.opts,
+        turn_number,
+        turn_context.max_turns
+      )
 
     with {:ok, turn_session} <-
            AppServer.run_turn(
              app_session,
              prompt,
              issue,
-             on_message: codex_message_handler(codex_update_recipient, issue)
+             on_message:
+               codex_message_handler(turn_context.codex_update_recipient, issue, %{
+                 workspace_path: turn_context.workspace,
+                 worker_host: turn_context.worker_host
+               })
            ) do
-      Logger.info("Completed agent run for #{issue_context(issue)} session_id=#{turn_session[:session_id]} workspace=#{workspace} turn=#{turn_number}/#{max_turns}")
+      Logger.info(
+        "Completed agent run for #{issue_context(issue)} " <>
+          "session_id=#{turn_session[:session_id]} " <>
+          "workspace=#{turn_context.workspace} " <>
+          "turn=#{turn_number}/#{turn_context.max_turns}"
+      )
 
-      case continue_with_issue?(issue, issue_state_fetcher) do
-        {:continue, refreshed_issue} when turn_number < max_turns ->
-          Logger.info("Continuing agent run for #{issue_context(refreshed_issue)} after normal turn completion turn=#{turn_number}/#{max_turns}")
-
-          do_run_codex_turns(
-            app_session,
-            workspace,
-            refreshed_issue,
-            codex_update_recipient,
-            opts,
-            issue_state_fetcher,
-            turn_number + 1,
-            max_turns
+      case continue_with_issue?(issue, turn_context.issue_state_fetcher) do
+        {:continue, refreshed_issue} when turn_number < turn_context.max_turns ->
+          Logger.info(
+            "Continuing agent run for #{issue_context(refreshed_issue)} " <>
+              "after normal turn completion turn=#{turn_number}/#{turn_context.max_turns}"
           )
 
+          do_run_codex_turns(app_session, refreshed_issue, turn_context, turn_number + 1)
+
         {:continue, refreshed_issue} ->
-          Logger.info("Reached agent.max_turns for #{issue_context(refreshed_issue)} with issue still active; returning control to orchestrator")
+          Logger.info(
+            "Reached agent.max_turns for #{issue_context(refreshed_issue)} " <>
+              "with issue still active; returning control to orchestrator"
+          )
 
           :ok
 

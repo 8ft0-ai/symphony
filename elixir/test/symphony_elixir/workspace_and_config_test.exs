@@ -295,6 +295,69 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert :ok = Workspace.remove_issue_workspaces(nil)
   end
 
+  test "workspace cleanup preserves transcripts stored outside the workspace root" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-transcript-workspace-cleanup-#{System.unique_integer([:positive])}"
+      )
+
+    transcripts_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-transcript-store-cleanup-#{System.unique_integer([:positive])}"
+      )
+
+    issue = %Issue{
+      id: "issue-transcript-cleanup",
+      identifier: "MT-TRANSCRIPT-CLEANUP",
+      title: "Keep transcript after cleanup",
+      state: "In Progress"
+    }
+
+    workspace = Path.join(workspace_root, issue.identifier)
+
+    try do
+      File.mkdir_p!(workspace)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        observability_transcripts_root: transcripts_root
+      )
+
+      assert :ok =
+               TranscriptStore.append(
+                 issue,
+                 %{
+                   workspace_path: workspace,
+                   session_id: "thread-workspace-cleanup",
+                   thread_id: "thread-workspace-cleanup",
+                   turn_id: "turn-1"
+                 },
+                 %{
+                   event: :session_started,
+                   session_id: "thread-workspace-cleanup",
+                   thread_id: "thread-workspace-cleanup",
+                   turn_id: "turn-1",
+                   timestamp: ~U[2026-04-06 01:02:03Z]
+                 }
+               )
+
+      assert File.exists?(TranscriptStore.manifest_path(issue.identifier))
+
+      assert :ok = Workspace.remove_issue_workspaces(issue.identifier)
+
+      refute File.exists?(workspace)
+
+      assert {:ok, [session]} = TranscriptStore.list_issue_sessions(issue.identifier)
+      assert session["session_id"] == "thread-workspace-cleanup"
+      assert File.exists?(TranscriptStore.session_path(issue.identifier, session))
+    after
+      File.rm_rf(workspace_root)
+      File.rm_rf(transcripts_root)
+    end
+  end
+
   test "linear issue helpers" do
     issue = %Issue{
       id: "abc",

@@ -153,7 +153,10 @@ defmodule SymphonyElixirWeb.DashboardLive do
                     <td>
                       <div class="issue-stack">
                         <span class="issue-id"><%= entry.issue_identifier %></span>
-                        <a class="issue-link" href={"/api/v1/#{entry.issue_identifier}"}>JSON details</a>
+                        <div class="issue-links">
+                          <a class="issue-link" href={"/api/v1/#{entry.issue_identifier}"}>JSON details</a>
+                          <a class="issue-link" href={"/issues/#{entry.issue_identifier}"}>Transcript</a>
+                        </div>
                       </div>
                     </td>
                     <td>
@@ -232,7 +235,10 @@ defmodule SymphonyElixirWeb.DashboardLive do
                     <td>
                       <div class="issue-stack">
                         <span class="issue-id"><%= entry.issue_identifier %></span>
-                        <a class="issue-link" href={"/api/v1/#{entry.issue_identifier}"}>JSON details</a>
+                        <div class="issue-links">
+                          <a class="issue-link" href={"/api/v1/#{entry.issue_identifier}"}>JSON details</a>
+                          <a class="issue-link" href={"/issues/#{entry.issue_identifier}"}>Transcript</a>
+                        </div>
                       </div>
                     </td>
                     <td><%= entry.attempt %></td>
