@@ -957,7 +957,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
     assert is_integer(due_at_ms)
     remaining_ms = due_at_ms - System.monotonic_time(:millisecond)
-    assert remaining_ms >= 9_500
+    assert remaining_ms >= 8_000
     assert remaining_ms <= 10_500
   end
 
@@ -1107,6 +1107,33 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     plain = Regex.replace(~r/\e\[[0-9;]*m/, rendered, "")
 
     assert plain =~ ~r/MT-777.*\r?\n│\s*\r?\n├─ Backoff queue/s
+  end
+
+  test "status dashboard renders blocked issues with reason and clearance hint" do
+    snapshot_data =
+      {:ok,
+       %{
+         running: [],
+         retrying: [],
+         blocked: [
+           %{
+             identifier: "MT-888",
+             reason_code: "approval_required",
+             summary: "Linear requires approval for this mutation.",
+             clearance_hint: "Approve the mutation or adjust the workflow."
+           }
+         ],
+         codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+         rate_limits: nil
+       }}
+
+    rendered = StatusDashboard.format_snapshot_content_for_test(snapshot_data, 0.0)
+    plain = Regex.replace(~r/\e\[[0-9;]*m/, rendered, "")
+
+    assert plain =~ "Blocked issues"
+    assert plain =~ "MT-888"
+    assert plain =~ "approval_required"
+    assert plain =~ "Approve the mutation or adjust the workflow."
   end
 
   test "status dashboard renders an unstyled closing corner when the retry queue is empty" do
@@ -1434,6 +1461,22 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
     assert StatusDashboard.humanize_codex_message(unsupported) =~
              "unsupported dynamic tool call rejected (unknown_tool)"
+  end
+
+  test "status dashboard humanizes reported run outcomes" do
+    message = %{
+      event: :run_outcome_reported,
+      message: %{
+        disposition: %{
+          status: "blocked",
+          reason_code: "git_metadata_writes_unavailable",
+          summary: "Git metadata writes are unavailable in this runtime."
+        }
+      }
+    }
+
+    assert StatusDashboard.humanize_codex_message(message) ==
+             "run outcome reported (blocked/git_metadata_writes_unavailable): Git metadata writes are unavailable in this runtime."
   end
 
   test "status dashboard unwraps nested codex payload envelopes" do

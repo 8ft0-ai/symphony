@@ -26,6 +26,12 @@ defmodule SymphonyElixir.Linear.Client do
         assignee {
           id
         }
+        attachments {
+          nodes {
+            title
+            url
+          }
+        }
         labels {
           nodes {
             name
@@ -70,6 +76,12 @@ defmodule SymphonyElixir.Linear.Client do
         url
         assignee {
           id
+        }
+        attachments {
+          nodes {
+            title
+            url
+          }
         }
         labels {
           nodes {
@@ -458,6 +470,7 @@ defmodule SymphonyElixir.Linear.Client do
       branch_name: issue["branchName"],
       url: issue["url"],
       assignee_id: assignee_field(assignee, "id"),
+      attachments: extract_attachments(issue),
       blocked_by: extract_blockers(issue),
       labels: extract_labels(issue),
       assigned_to_worker: assigned_to_worker?(assignee, assignee_filter),
@@ -467,6 +480,24 @@ defmodule SymphonyElixir.Linear.Client do
   end
 
   defp normalize_issue(_issue, _assignee_filter), do: nil
+
+  defp extract_attachments(issue) when is_map(issue) do
+    issue
+    |> get_in(["attachments", "nodes"])
+    |> case do
+      nodes when is_list(nodes) ->
+        Enum.flat_map(nodes, fn
+          %{} = node ->
+            [%{"title" => node["title"], "url" => node["url"]}]
+
+          _ ->
+            []
+        end)
+
+      _ ->
+        []
+    end
+  end
 
   defp assignee_field(%{} = assignee, field) when is_binary(field), do: assignee[field]
   defp assignee_field(_assignee, _field), do: nil

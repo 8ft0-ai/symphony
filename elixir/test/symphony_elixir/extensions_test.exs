@@ -355,7 +355,7 @@ defmodule SymphonyElixir.ExtensionsTest do
     conn = get(build_conn(), "/api/v1/state")
     state_payload = json_response(conn, 200)
 
-    assert state_payload["counts"] == %{"running" => 1, "retrying" => 1}
+    assert state_payload["counts"] == %{"blocked" => 1, "running" => 1, "retrying" => 1}
     assert state_payload["codex_totals"] == %{"input_tokens" => 4, "output_tokens" => 8, "total_tokens" => 12, "seconds_running" => 42.5}
     assert state_payload["rate_limits"] == %{"primary" => %{"remaining" => 11}}
 
@@ -375,6 +375,16 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert retry_entry["issue_ui_url"] == "/issues/MT-RETRY"
     assert retry_entry["attempt"] == 2
     assert retry_entry["error"] == "boom"
+
+    assert [blocked_entry] = state_payload["blocked"]
+    assert blocked_entry["issue_id"] == "issue-blocked"
+    assert blocked_entry["issue_identifier"] == "MT-BLOCKED"
+    assert blocked_entry["reason_code"] == "approval_required"
+    assert blocked_entry["summary"] == "Linear requires approval for this mutation."
+    assert blocked_entry["clearance_hint"] == "Approve the mutation or adjust the workflow."
+    assert blocked_entry["worker_host"] == "worker-b"
+    assert blocked_entry["workspace_path"] == "/tmp/symphony-blocked"
+    assert blocked_entry["retryable"] == false
 
     conn = get(build_conn(), "/api/v1/MT-HTTP")
     issue_payload = json_response(conn, 200)
@@ -833,7 +843,8 @@ defmodule SymphonyElixir.ExtensionsTest do
 
     response = Req.get!("http://127.0.0.1:#{port}/api/v1/state")
     assert response.status == 200
-    assert response.body["counts"] == %{"running" => 1, "retrying" => 1}
+    assert response.body["counts"] == %{"blocked" => 1, "running" => 1, "retrying" => 1}
+    assert [%{"issue_identifier" => "MT-BLOCKED", "reason_code" => "approval_required"}] = response.body["blocked"]
 
     dashboard_css = Req.get!("http://127.0.0.1:#{port}/dashboard.css")
     assert dashboard_css.status == 200
@@ -901,6 +912,22 @@ defmodule SymphonyElixir.ExtensionsTest do
           attempt: 2,
           due_in_ms: 2_000,
           error: "boom"
+        }
+      ],
+      blocked: [
+        %{
+          issue_id: "issue-blocked",
+          identifier: "MT-BLOCKED",
+          reason_code: "approval_required",
+          summary: "Linear requires approval for this mutation.",
+          clearance_hint: "Approve the mutation or adjust the workflow.",
+          blocked_at: ~U[2026-04-06 10:11:12Z],
+          issue_state: "In Review",
+          issue_updated_at: ~U[2026-04-06 10:10:00Z],
+          worker_host: "worker-b",
+          workspace_path: "/tmp/symphony-blocked",
+          retryable: false,
+          details: %{"source" => "linear"}
         }
       ],
       codex_totals: %{input_tokens: 4, output_tokens: 8, total_tokens: 12, seconds_running: 42.5},

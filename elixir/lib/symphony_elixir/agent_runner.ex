@@ -5,7 +5,7 @@ defmodule SymphonyElixir.AgentRunner do
 
   require Logger
   alias SymphonyElixir.Codex.AppServer
-  alias SymphonyElixir.{Config, Linear.Issue, PromptBuilder, Tracker, TranscriptStore, Workspace}
+  alias SymphonyElixir.{Config, Linear.Issue, PromptBuilder, RunDisposition, Tracker, TranscriptStore, Workspace}
 
   @type worker_host :: String.t() | nil
 
@@ -17,12 +17,25 @@ defmodule SymphonyElixir.AgentRunner do
     Logger.info("Starting agent run for #{issue_context(issue)} worker_host=#{worker_host_for_log(worker_host)}")
 
     case run_on_worker_host(issue, codex_update_recipient, opts, worker_host) do
-      :ok ->
+      {:ok, %RunDisposition{} = disposition} ->
+        send_run_disposition(codex_update_recipient, issue, disposition)
         :ok
 
       {:error, reason} ->
-        Logger.error("Agent run failed for #{issue_context(issue)}: #{inspect(reason)}")
-        raise RuntimeError, "Agent run failed for #{issue_context(issue)}: #{inspect(reason)}"
+        disposition = RunDisposition.from_app_server_error(reason)
+        send_run_disposition(codex_update_recipient, issue, disposition)
+
+        if RunDisposition.blocked?(disposition) do
+          Logger.warning(
+            "Agent run blocked for #{issue_context(issue)} " <>
+              "reason_code=#{disposition.reason_code} summary=#{inspect(disposition.summary)}"
+          )
+
+          :ok
+        else
+          Logger.error("Agent run failed for #{issue_context(issue)}: #{inspect(reason)}")
+          raise RuntimeError, "Agent run failed for #{issue_context(issue)}: #{inspect(reason)}"
+        end
     end
   end
 
@@ -121,6 +134,14 @@ defmodule SymphonyElixir.AgentRunner do
 
   defp send_worker_runtime_info(_recipient, _issue, _worker_host, _workspace), do: :ok
 
+  defp send_run_disposition(recipient, %Issue{id: issue_id}, %RunDisposition{} = disposition)
+       when is_binary(issue_id) and is_pid(recipient) do
+    send(recipient, {:agent_run_disposition, issue_id, disposition})
+    :ok
+  end
+
+  defp send_run_disposition(_recipient, _issue, _disposition), do: :ok
+
   defp run_codex_turns(workspace, issue, codex_update_recipient, opts, worker_host) do
     max_turns = Keyword.get(opts, :max_turns, Config.settings!().agent.max_turns)
     issue_state_fetcher = Keyword.get(opts, :issue_state_fetcher, &Tracker.fetch_issue_states_by_ids/1)
@@ -163,6 +184,10 @@ defmodule SymphonyElixir.AgentRunner do
                  worker_host: turn_context.worker_host
                })
            ) do
+      disposition =
+        turn_session[:disposition] ||
+          RunDisposition.completed(%{summary: RunDisposition.default_completed_summary()})
+
       Logger.info(
         "Completed agent run for #{issue_context(issue)} " <>
           "session_id=#{turn_session[:session_id]} " <>
@@ -170,29 +195,44 @@ defmodule SymphonyElixir.AgentRunner do
           "turn=#{turn_number}/#{turn_context.max_turns}"
       )
 
-      case continue_with_issue?(issue, turn_context.issue_state_fetcher) do
-        {:continue, refreshed_issue} when turn_number < turn_context.max_turns ->
-          Logger.info(
-            "Continuing agent run for #{issue_context(refreshed_issue)} " <>
-              "after normal turn completion turn=#{turn_number}/#{turn_context.max_turns}"
+      case disposition.status do
+        :blocked ->
+          Logger.warning(
+            "Agent run reported blocked disposition for #{issue_context(issue)} " <>
+              "reason_code=#{disposition.reason_code} summary=#{inspect(disposition.summary)}"
           )
 
-          do_run_codex_turns(app_session, refreshed_issue, turn_context, turn_number + 1)
+          {:ok, disposition}
 
-        {:continue, refreshed_issue} ->
-          Logger.info(
-            "Reached agent.max_turns for #{issue_context(refreshed_issue)} " <>
-              "with issue still active; returning control to orchestrator"
-          )
-
-          :ok
-
-        {:done, _refreshed_issue} ->
-          :ok
-
-        {:error, reason} ->
-          {:error, reason}
+        _ ->
+          continue_after_turn(app_session, issue, disposition, turn_context, turn_number)
       end
+    end
+  end
+
+  defp continue_after_turn(app_session, issue, disposition, turn_context, turn_number) do
+    case continue_with_issue?(issue, turn_context.issue_state_fetcher) do
+      {:continue, refreshed_issue} when turn_number < turn_context.max_turns ->
+        Logger.info(
+          "Continuing agent run for #{issue_context(refreshed_issue)} " <>
+            "after normal turn completion turn=#{turn_number}/#{turn_context.max_turns}"
+        )
+
+        do_run_codex_turns(app_session, refreshed_issue, turn_context, turn_number + 1)
+
+      {:continue, refreshed_issue} ->
+        Logger.info(
+          "Reached agent.max_turns for #{issue_context(refreshed_issue)} " <>
+            "with issue still active; returning control to orchestrator"
+        )
+
+        {:ok, disposition}
+
+      {:done, _refreshed_issue} ->
+        {:ok, disposition}
+
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 
