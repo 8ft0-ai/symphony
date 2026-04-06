@@ -1418,6 +1418,8 @@ Minimum endpoints:
           "issue_identifier": "MT-649",
           "state": "In Progress",
           "session_id": "thread-1-turn-1",
+          "transcript_url": "/api/v1/MT-649/transcript",
+          "issue_ui_url": "/issues/MT-649",
           "turn_count": 7,
           "last_event": "turn_completed",
           "last_message": "",
@@ -1436,7 +1438,9 @@ Minimum endpoints:
           "issue_identifier": "MT-650",
           "attempt": 3,
           "due_at": "2026-02-24T20:16:00Z",
-          "error": "no available orchestrator slots"
+          "error": "no available orchestrator slots",
+          "transcript_url": "/api/v1/MT-650/transcript",
+          "issue_ui_url": "/issues/MT-650"
         }
       ],
       "codex_totals": {
@@ -1485,8 +1489,8 @@ Minimum endpoints:
         "codex_session_logs": [
           {
             "label": "latest",
-            "path": "/var/log/symphony/codex/MT-649/latest.log",
-            "url": null
+            "path": "/var/log/symphony/log/codex_sessions/issues/MT-649/thread-1-turn-1.ndjson",
+            "url": "/api/v1/sessions/thread-1-turn-1.ndjson"
           }
         ]
       },
@@ -1494,9 +1498,17 @@ Minimum endpoints:
         {
           "at": "2026-02-24T20:14:59Z",
           "event": "notification",
+          "method": "item/agentMessage/delta",
+          "session_id": "thread-1-turn-1",
           "message": "Working on tests"
         }
       ],
+      "transcripts": {
+        "enabled": true,
+        "transcript_url": "/api/v1/MT-649/transcript",
+        "issue_ui_url": "/issues/MT-649",
+        "recent_events_limit": 50
+      },
       "last_error": null,
       "tracked": {}
     }
@@ -1504,6 +1516,90 @@ Minimum endpoints:
 
   - If the issue is unknown to the current in-memory state, return `404` with an error response (for
     example `{\"error\":{\"code\":\"issue_not_found\",\"message\":\"...\"}}`).
+  - `logs.codex_session_logs` should expose actual persisted session transcript/log metadata when
+    available rather than a hardcoded placeholder.
+
+- `GET /api/v1/<issue_identifier>/transcript`
+  - Returns persisted transcript/session summaries for the issue plus recent events.
+  - This endpoint is especially useful when the issue is no longer active in memory but a durable
+    transcript manifest still exists.
+  - Suggested response shape:
+
+    ```json
+    {
+      "issue_identifier": "MT-649",
+      "issue_id": "abc123",
+      "status": "completed",
+      "enabled": true,
+      "transcript_url": "/api/v1/MT-649/transcript",
+      "issue_ui_url": "/issues/MT-649",
+      "sessions": [
+        {
+          "session_id": "thread-1-turn-1",
+          "thread_id": "thread-1",
+          "turn_id": "turn-1",
+          "status": "completed",
+          "started_at": "2026-02-24T20:10:12Z",
+          "ended_at": "2026-02-24T20:14:59Z",
+          "event_count": 37,
+          "label": "latest",
+          "latest": true,
+          "path": "/var/log/symphony/log/codex_sessions/issues/MT-649/thread-1-turn-1.ndjson",
+          "url": "/api/v1/sessions/thread-1-turn-1",
+          "ndjson_url": "/api/v1/sessions/thread-1-turn-1.ndjson"
+        }
+      ],
+      "recent_events": [
+        {
+          "ts": "2026-02-24T20:14:59Z",
+          "event": "turn_completed",
+          "session_id": "thread-1-turn-1",
+          "summary": "turn completed"
+        }
+      ]
+    }
+    ```
+
+- `GET /api/v1/sessions/<session_id>`
+  - Returns paginated transcript events for a single persisted session.
+  - Recommended query parameters:
+    - `limit` for page size
+    - `cursor` for event-sequence pagination
+    - `order` as `asc` or `desc`
+  - Suggested response shape:
+
+    ```json
+    {
+      "enabled": true,
+      "issue_identifier": "MT-649",
+      "session": {
+        "session_id": "thread-1-turn-1",
+        "url": "/api/v1/sessions/thread-1-turn-1",
+        "ndjson_url": "/api/v1/sessions/thread-1-turn-1.ndjson"
+      },
+      "events": [
+        {
+          "sequence": 36,
+          "ts": "2026-02-24T20:14:57Z",
+          "event": "notification",
+          "method": "item/agentMessage/delta",
+          "summary": "Working on tests"
+        }
+      ],
+      "page": {
+        "limit": 50,
+        "order": "desc",
+        "cursor": null,
+        "next_cursor": 35,
+        "has_more": true
+      }
+    }
+    ```
+
+- `GET /api/v1/sessions/<session_id>.ndjson`
+  - Returns the raw persisted NDJSON transcript for download or streaming.
+  - If transcript persistence is disabled, implementations may return an empty body together with
+    explicit status metadata (for example a response header indicating transcripts are disabled).
 
 - `POST /api/v1/refresh`
   - Queues an immediate tracker poll + reconciliation cycle (best-effort trigger; implementations
@@ -1524,9 +1620,14 @@ API design notes:
 
 - The JSON shapes above are the recommended baseline for interoperability and debugging ergonomics.
 - Implementations may add fields, but should avoid breaking existing fields within a version.
+- Transcript-related additions should be additive so existing `/api/v1/state`,
+  `/api/v1/<issue_identifier>`, and `/api/v1/refresh` consumers keep working.
 - Endpoints should be read-only except for operational triggers like `/refresh`.
 - Unsupported methods on defined routes should return `405 Method Not Allowed`.
 - API errors should use a JSON envelope such as `{"error":{"code":"...","message":"..."}}`.
+- If the implementation exposes a configurable logs root (for example a CLI `--logs-root`), durable
+  transcript storage should move with that logs root and stay outside per-issue workspaces so
+  transcript retention is not affected by workspace cleanup.
 - If the dashboard is a client-side app, it should consume this API rather than duplicating state
   logic.
 

@@ -297,16 +297,36 @@ defmodule SymphonyElixir.CoreTest do
     issue_id = "issue-2"
     issue_identifier = "MT-556"
     workspace = Path.join(test_root, issue_identifier)
+    transcripts_root = Path.join(test_root, "transcripts")
 
     try do
       write_workflow_file!(Workflow.workflow_file_path(),
         workspace_root: test_root,
+        observability_transcripts_root: transcripts_root,
         tracker_active_states: ["Todo", "In Progress", "In Review"],
         tracker_terminal_states: ["Closed", "Cancelled", "Canceled", "Duplicate"]
       )
 
       File.mkdir_p!(test_root)
       File.mkdir_p!(workspace)
+
+      assert :ok =
+               TranscriptStore.append(
+                 %Issue{id: issue_id, identifier: issue_identifier, title: "Done", state: "In Progress"},
+                 %{
+                   workspace_path: workspace,
+                   session_id: "thread-terminal-cleanup",
+                   thread_id: "thread-terminal-cleanup",
+                   turn_id: "turn-1"
+                 },
+                 %{
+                   event: :session_started,
+                   session_id: "thread-terminal-cleanup",
+                   thread_id: "thread-terminal-cleanup",
+                   turn_id: "turn-1",
+                   timestamp: ~U[2026-04-06 02:03:04Z]
+                 }
+               )
 
       agent_pid =
         spawn(fn ->
@@ -345,6 +365,9 @@ defmodule SymphonyElixir.CoreTest do
       refute MapSet.member?(updated_state.claimed, issue_id)
       refute Process.alive?(agent_pid)
       refute File.exists?(workspace)
+      assert {:ok, [session]} = TranscriptStore.list_issue_sessions(issue_identifier)
+      assert session["session_id"] == "thread-terminal-cleanup"
+      assert File.exists?(TranscriptStore.session_path(issue_identifier, session))
     after
       File.rm_rf(test_root)
     end
@@ -1159,6 +1182,207 @@ defmodule SymphonyElixir.CoreTest do
                      500
 
       assert session_id == "thread-live-turn-live"
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "agent runner persists transcript events without mutating forwarded updates" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-agent-runner-transcripts-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      template_repo = Path.join(test_root, "source")
+      workspace_root = Path.join(test_root, "workspaces")
+      transcripts_root = Path.join(test_root, "transcripts")
+      codex_binary = Path.join(test_root, "fake-codex")
+
+      File.mkdir_p!(template_repo)
+      File.write!(Path.join(template_repo, "README.md"), "# test")
+      System.cmd("git", ["-C", template_repo, "init", "-b", "main"])
+      System.cmd("git", ["-C", template_repo, "config", "user.name", "Test User"])
+      System.cmd("git", ["-C", template_repo, "config", "user.email", "test@example.com"])
+      System.cmd("git", ["-C", template_repo, "add", "README.md"])
+      System.cmd("git", ["-C", template_repo, "commit", "-m", "initial"])
+
+      File.write!(
+        codex_binary,
+        """
+        #!/bin/sh
+        count=0
+        while IFS= read -r line; do
+          count=$((count + 1))
+          case "$count" in
+            1)
+              printf '%s\\n' '{\"id\":1,\"result\":{}}'
+              ;;
+            2)
+              ;;
+            3)
+              printf '%s\\n' '{\"id\":2,\"result\":{\"thread\":{\"id\":\"thread-transcript\"}}}'
+              ;;
+            4)
+              printf '%s\\n' '{\"id\":3,\"result\":{\"turn\":{\"id\":\"turn-transcript\"}}}'
+              printf '%s\\n' '{\"method\":\"item/agentMessage/delta\",\"params\":{\"delta\":\"persist this\"}}'
+              printf '%s\\n' '{\"method\":\"turn/completed\"}'
+              exit 0
+              ;;
+            *)
+              ;;
+          esac
+        done
+        """
+      )
+
+      File.chmod!(codex_binary, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        hook_after_create: "cp #{Path.join(template_repo, "README.md")} README.md",
+        codex_command: "#{codex_binary} app-server",
+        observability_transcripts_root: transcripts_root
+      )
+
+      issue = %Issue{
+        id: "issue-transcript-forwarding",
+        identifier: "MT-1500",
+        title: "Persist transcript updates",
+        description: "Capture transcript events",
+        state: "In Progress",
+        url: "https://example.org/issues/MT-1500",
+        labels: ["backend"]
+      }
+
+      assert :ok =
+               AgentRunner.run(
+                 issue,
+                 self(),
+                 issue_state_fetcher: fn [_issue_id] -> {:ok, [%{issue | state: "Done"}]} end
+               )
+
+      assert_receive {:codex_worker_update, "issue-transcript-forwarding",
+                      %{
+                        event: :session_started,
+                        session_id: "thread-transcript-turn-transcript",
+                        timestamp: %DateTime{}
+                      }},
+                     500
+
+      assert_receive {:codex_worker_update, "issue-transcript-forwarding", %{event: :notification, payload: %{"method" => "item/agentMessage/delta"}} = forwarded_notification},
+                     500
+
+      refute Map.has_key?(forwarded_notification, :session_id)
+
+      assert_receive {:codex_worker_update, "issue-transcript-forwarding", %{event: :turn_completed, timestamp: %DateTime{}}},
+                     500
+
+      assert {:ok, [session]} = TranscriptStore.list_issue_sessions(issue.identifier)
+      assert session["session_id"] == "thread-transcript-turn-transcript"
+      assert session["status"] == "completed"
+      assert session["event_count"] == 3
+
+      assert {:ok, transcript_page} =
+               TranscriptStore.read_session_events("thread-transcript-turn-transcript", order: :asc)
+
+      assert Enum.map(transcript_page.events, & &1["event"]) == [
+               "session_started",
+               "notification",
+               "turn_completed"
+             ]
+
+      assert Enum.at(transcript_page.events, 1)["method"] == "item/agentMessage/delta"
+      assert Enum.at(transcript_page.events, 1)["workspace_path"] == session["workspace_path"]
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "agent runner logs transcript persistence failures as warnings and still completes" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-agent-runner-transcript-failure-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      template_repo = Path.join(test_root, "source")
+      workspace_root = Path.join(test_root, "workspaces")
+      transcripts_root = Path.join(test_root, "transcripts-root-file")
+      codex_binary = Path.join(test_root, "fake-codex")
+
+      File.mkdir_p!(template_repo)
+      File.write!(Path.join(template_repo, "README.md"), "# test")
+      File.write!(transcripts_root, "not a directory")
+      System.cmd("git", ["-C", template_repo, "init", "-b", "main"])
+      System.cmd("git", ["-C", template_repo, "config", "user.name", "Test User"])
+      System.cmd("git", ["-C", template_repo, "config", "user.email", "test@example.com"])
+      System.cmd("git", ["-C", template_repo, "add", "README.md"])
+      System.cmd("git", ["-C", template_repo, "commit", "-m", "initial"])
+
+      File.write!(
+        codex_binary,
+        """
+        #!/bin/sh
+        count=0
+        while IFS= read -r line; do
+          count=$((count + 1))
+          case "$count" in
+            1)
+              printf '%s\\n' '{\"id\":1,\"result\":{}}'
+              ;;
+            2)
+              ;;
+            3)
+              printf '%s\\n' '{\"id\":2,\"result\":{\"thread\":{\"id\":\"thread-warning\"}}}'
+              ;;
+            4)
+              printf '%s\\n' '{\"id\":3,\"result\":{\"turn\":{\"id\":\"turn-warning\"}}}'
+              printf '%s\\n' '{\"method\":\"turn/completed\"}'
+              exit 0
+              ;;
+            *)
+              ;;
+          esac
+        done
+        """
+      )
+
+      File.chmod!(codex_binary, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        hook_after_create: "cp #{Path.join(template_repo, "README.md")} README.md",
+        codex_command: "#{codex_binary} app-server",
+        observability_transcripts_root: transcripts_root
+      )
+
+      issue = %Issue{
+        id: "issue-transcript-warning",
+        identifier: "MT-1501",
+        title: "Transcript persistence warning",
+        description: "Do not fail the run",
+        state: "In Progress",
+        url: "https://example.org/issues/MT-1501",
+        labels: ["backend"]
+      }
+
+      log =
+        capture_log(fn ->
+          assert :ok =
+                   AgentRunner.run(
+                     issue,
+                     self(),
+                     issue_state_fetcher: fn [_issue_id] -> {:ok, [%{issue | state: "Done"}]} end
+                   )
+        end)
+
+      assert log =~ "Transcript persistence failed for issue_id=issue-transcript-warning issue_identifier=MT-1501"
+      assert log =~ "event=:session_started"
+      assert_receive {:codex_worker_update, "issue-transcript-warning", %{event: :session_started}}, 500
+      assert_receive {:codex_worker_update, "issue-transcript-warning", %{event: :turn_completed}}, 500
     after
       File.rm_rf(test_root)
     end

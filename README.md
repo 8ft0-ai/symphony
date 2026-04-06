@@ -34,6 +34,22 @@ help with the setup:
 > Set up Symphony for my repository based on
 > https://github.com/openai/symphony/blob/main/elixir/README.md
 
+## Observability And Transcripts
+
+The current Elixir reference implementation can expose an observability dashboard and transcript
+inspection surface when started with `--port`.
+
+- Dashboard: `/`
+- Issue transcript UI: `/issues/<issue_identifier>`
+- Summary and control API: `/api/v1/state`, `/api/v1/<issue_identifier>`, `/api/v1/refresh`
+- Transcript APIs: `/api/v1/<issue_identifier>/transcript`,
+  `/api/v1/sessions/<session_id>`, and `/api/v1/sessions/<session_id>.ndjson`
+
+Per-session transcript files are stored as NDJSON outside per-issue workspaces so they survive
+workspace cleanup. By default they live under `./log/codex_sessions`. If you start Symphony with
+`--logs-root /path/to/runtime`, the transcript root moves with the log root to
+`/path/to/runtime/log/codex_sessions`.
+
 ---
 
 ## License

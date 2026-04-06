@@ -3,7 +3,10 @@ defmodule SymphonyElixirWeb.Presenter do
   Shared projections for the observability API and dashboard.
   """
 
+  require Logger
+
   alias SymphonyElixir.{Config, Orchestrator, StatusDashboard}
+  alias SymphonyElixir.TranscriptStore
 
   @spec state_payload(GenServer.name(), timeout()) :: map()
   def state_payload(orchestrator, snapshot_timeout_ms) do
@@ -33,19 +36,107 @@ defmodule SymphonyElixirWeb.Presenter do
 
   @spec issue_payload(String.t(), GenServer.name(), timeout()) :: {:ok, map()} | {:error, :issue_not_found}
   def issue_payload(issue_identifier, orchestrator, snapshot_timeout_ms) when is_binary(issue_identifier) do
-    case Orchestrator.snapshot(orchestrator, snapshot_timeout_ms) do
-      %{} = snapshot ->
-        running = Enum.find(snapshot.running, &(&1.identifier == issue_identifier))
-        retry = Enum.find(snapshot.retrying, &(&1.identifier == issue_identifier))
+    case snapshot_issue_entries(issue_identifier, orchestrator, snapshot_timeout_ms) do
+      {:ok, running, retry} ->
+        {:ok, issue_payload_body(issue_identifier, running, retry)}
 
-        if is_nil(running) and is_nil(retry) do
-          {:error, :issue_not_found}
-        else
-          {:ok, issue_payload_body(issue_identifier, running, retry)}
-        end
-
-      _ ->
+      {:error, :issue_not_found} ->
         {:error, :issue_not_found}
+    end
+  end
+
+  @spec transcript_payload(String.t(), GenServer.name(), timeout()) :: {:ok, map()} | {:error, :issue_not_found}
+  def transcript_payload(issue_identifier, orchestrator, snapshot_timeout_ms) when is_binary(issue_identifier) do
+    issue_entries =
+      case snapshot_issue_entries(issue_identifier, orchestrator, snapshot_timeout_ms) do
+        {:ok, running, retry} -> {running, retry}
+        {:error, :issue_not_found} -> {nil, nil}
+      end
+
+    running = elem(issue_entries, 0)
+    retry = elem(issue_entries, 1)
+
+    with {:ok, sessions} <- TranscriptStore.list_issue_sessions(issue_identifier),
+         {:ok, recent_events} <- TranscriptStore.recent_events(issue_identifier) do
+      cond do
+        TranscriptStore.transcripts_enabled?() == false ->
+          {:ok, transcript_payload_body(issue_identifier, running, retry, sessions, recent_events)}
+
+        sessions != [] ->
+          {:ok, transcript_payload_body(issue_identifier, running, retry, sessions, recent_events)}
+
+        not is_nil(running) or not is_nil(retry) ->
+          {:ok, transcript_payload_body(issue_identifier, running, retry, sessions, recent_events)}
+
+        true ->
+          {:error, :issue_not_found}
+      end
+    else
+      {:error, reason} ->
+        Logger.warning("Transcript payload read failed issue_identifier=#{issue_identifier}: #{inspect(reason)}")
+        {:error, :issue_not_found}
+    end
+  end
+
+  @spec session_payload(String.t(), keyword()) :: {:ok, map()} | {:error, :session_not_found}
+  def session_payload(session_id, opts \\ []) when is_binary(session_id) do
+    case TranscriptStore.read_session_events(session_id, opts) do
+      {:ok, %{issue_identifier: issue_identifier, session: nil, events: events, page: page}} ->
+        {:ok,
+         %{
+           enabled: TranscriptStore.transcripts_enabled?(),
+           issue_identifier: issue_identifier,
+           session: nil,
+           events: events,
+           page: page
+         }}
+
+      {:ok, %{issue_identifier: issue_identifier, session: session, events: events, page: page}} ->
+        {:ok,
+         %{
+           enabled: TranscriptStore.transcripts_enabled?(),
+           issue_identifier: issue_identifier,
+           session: transcript_session_payload(session, issue_identifier, false),
+           events: events,
+           page: page
+         }}
+
+      {:error, :session_not_found} ->
+        {:error, :session_not_found}
+
+      {:error, reason} ->
+        Logger.warning("Transcript session payload read failed session_id=#{session_id}: #{inspect(reason)}")
+        {:error, :session_not_found}
+    end
+  end
+
+  @spec session_ndjson_payload(String.t()) :: {:ok, map()} | {:error, :session_not_found}
+  def session_ndjson_payload(session_id) when is_binary(session_id) do
+    case TranscriptStore.read_session_ndjson(session_id) do
+      {:ok, %{content: content, issue_identifier: issue_identifier, session: nil}} ->
+        {:ok,
+         %{
+           enabled: TranscriptStore.transcripts_enabled?(),
+           content: content,
+           issue_identifier: issue_identifier,
+           session: nil
+         }}
+
+      {:ok, %{content: content, issue_identifier: issue_identifier, session: session}} ->
+        {:ok,
+         %{
+           enabled: TranscriptStore.transcripts_enabled?(),
+           content: content,
+           issue_identifier: issue_identifier,
+           session: transcript_session_payload(session, issue_identifier, false)
+         }}
+
+      {:error, :session_not_found} ->
+        {:error, :session_not_found}
+
+      {:error, reason} ->
+        Logger.warning("Transcript NDJSON read failed session_id=#{session_id}: #{inspect(reason)}")
+        {:error, :session_not_found}
     end
   end
 
@@ -61,6 +152,9 @@ defmodule SymphonyElixirWeb.Presenter do
   end
 
   defp issue_payload_body(issue_identifier, running, retry) do
+    sessions = transcript_sessions(issue_identifier)
+    recent_events = transcript_recent_events(issue_identifier)
+
     %{
       issue_identifier: issue_identifier,
       issue_id: issue_id_from_entries(running, retry),
@@ -76,11 +170,30 @@ defmodule SymphonyElixirWeb.Presenter do
       running: running && running_issue_payload(running),
       retry: retry && retry_issue_payload(retry),
       logs: %{
-        codex_session_logs: []
+        codex_session_logs: transcript_log_entries(issue_identifier, sessions)
       },
-      recent_events: (running && recent_events_payload(running)) || [],
+      recent_events: recent_events,
+      transcripts: %{
+        enabled: TranscriptStore.transcripts_enabled?(),
+        transcript_url: transcript_url(issue_identifier),
+        issue_ui_url: issue_ui_url(issue_identifier),
+        recent_events_limit: TranscriptStore.recent_events_limit()
+      },
       last_error: retry && retry.error,
       tracked: %{}
+    }
+  end
+
+  defp transcript_payload_body(issue_identifier, running, retry, sessions, recent_events) do
+    %{
+      issue_identifier: issue_identifier,
+      issue_id: issue_id_from_entries(running, retry) || issue_id_from_sessions(sessions),
+      status: transcript_status(running, retry, sessions),
+      enabled: TranscriptStore.transcripts_enabled?(),
+      transcript_url: transcript_url(issue_identifier),
+      issue_ui_url: issue_ui_url(issue_identifier),
+      sessions: transcript_session_payloads(sessions, issue_identifier),
+      recent_events: recent_events
     }
   end
 
@@ -103,6 +216,8 @@ defmodule SymphonyElixirWeb.Presenter do
       worker_host: Map.get(entry, :worker_host),
       workspace_path: Map.get(entry, :workspace_path),
       session_id: entry.session_id,
+      transcript_url: transcript_url(entry.identifier),
+      issue_ui_url: issue_ui_url(entry.identifier),
       turn_count: Map.get(entry, :turn_count, 0),
       last_event: entry.last_codex_event,
       last_message: summarize_message(entry.last_codex_message),
@@ -123,6 +238,8 @@ defmodule SymphonyElixirWeb.Presenter do
       attempt: entry.attempt,
       due_at: due_at_iso8601(entry.due_in_ms),
       error: entry.error,
+      transcript_url: transcript_url(entry.identifier),
+      issue_ui_url: issue_ui_url(entry.identifier),
       worker_host: Map.get(entry, :worker_host),
       workspace_path: Map.get(entry, :workspace_path)
     }
@@ -167,16 +284,117 @@ defmodule SymphonyElixirWeb.Presenter do
     (running && Map.get(running, :worker_host)) || (retry && Map.get(retry, :worker_host))
   end
 
-  defp recent_events_payload(running) do
-    [
-      %{
-        at: iso8601(running.last_codex_timestamp),
-        event: running.last_codex_event,
-        message: summarize_message(running.last_codex_message)
-      }
-    ]
-    |> Enum.reject(&is_nil(&1.at))
+  defp transcript_sessions(issue_identifier) do
+    case TranscriptStore.list_issue_sessions(issue_identifier) do
+      {:ok, sessions} ->
+        sessions
+
+      {:error, reason} ->
+        Logger.warning("Transcript session listing failed issue_identifier=#{issue_identifier}: #{inspect(reason)}")
+        []
+    end
   end
+
+  defp transcript_recent_events(issue_identifier) do
+    case TranscriptStore.recent_events(issue_identifier) do
+      {:ok, events} ->
+        Enum.map(events, fn event ->
+          %{
+            at: event["ts"],
+            event: event["event"],
+            method: event["method"],
+            session_id: event["session_id"],
+            message: event["summary"]
+          }
+        end)
+
+      {:error, reason} ->
+        Logger.warning("Transcript recent-event read failed issue_identifier=#{issue_identifier}: #{inspect(reason)}")
+        []
+    end
+  end
+
+  defp transcript_log_entries(issue_identifier, sessions) do
+    sessions
+    |> transcript_session_payloads(issue_identifier)
+    |> Enum.map(fn session ->
+      %{
+        label: session["label"],
+        path: session["path"],
+        url: session["ndjson_url"]
+      }
+    end)
+  end
+
+  defp transcript_session_payloads(sessions, issue_identifier) do
+    latest_session_id =
+      case sessions do
+        [%{"session_id" => session_id} | _] -> session_id
+        _ -> nil
+      end
+
+    Enum.map(sessions, fn session ->
+      transcript_session_payload(session, issue_identifier, session["session_id"] == latest_session_id)
+    end)
+  end
+
+  defp transcript_session_payload(session, issue_identifier, latest?) do
+    %{
+      "session_id" => session["session_id"],
+      "thread_id" => session["thread_id"],
+      "turn_id" => session["turn_id"],
+      "status" => session["status"],
+      "started_at" => session["started_at"],
+      "ended_at" => session["ended_at"],
+      "event_count" => session["event_count"],
+      "worker_host" => session["worker_host"],
+      "workspace_path" => session["workspace_path"],
+      "last_event" => session["last_event"],
+      "last_method" => session["last_method"],
+      "last_summary" => session["last_summary"],
+      "last_event_at" => session["last_event_at"],
+      "label" => if(latest?, do: "latest", else: session["session_id"]),
+      "latest" => latest?,
+      "path" => TranscriptStore.session_path(issue_identifier, session),
+      "url" => session_url(session["session_id"]),
+      "ndjson_url" => session_ndjson_url(session["session_id"])
+    }
+  end
+
+  defp issue_id_from_sessions([%{"session_id" => _} = _session | _] = sessions) do
+    sessions
+    |> List.first()
+    |> Map.get("issue_id")
+  end
+
+  defp issue_id_from_sessions(_sessions), do: nil
+
+  defp transcript_status(running, _retry, _sessions) when not is_nil(running), do: "running"
+  defp transcript_status(_running, retry, _sessions) when not is_nil(retry), do: "retrying"
+  defp transcript_status(_running, _retry, sessions) when sessions != [], do: "completed"
+  defp transcript_status(_running, _retry, _sessions), do: "unknown"
+
+  defp snapshot_issue_entries(issue_identifier, orchestrator, snapshot_timeout_ms) do
+    case Orchestrator.snapshot(orchestrator, snapshot_timeout_ms) do
+      %{} = snapshot ->
+        running = Enum.find(snapshot.running, &(&1.identifier == issue_identifier))
+        retry = Enum.find(snapshot.retrying, &(&1.identifier == issue_identifier))
+
+        if is_nil(running) and is_nil(retry) do
+          {:error, :issue_not_found}
+        else
+          {:ok, running, retry}
+        end
+
+      _ ->
+        {:error, :issue_not_found}
+    end
+  end
+
+  defp transcript_url(issue_identifier), do: "/api/v1/#{issue_identifier}/transcript"
+  defp issue_ui_url(issue_identifier), do: "/issues/#{issue_identifier}"
+  defp session_url(session_id), do: "/api/v1/sessions/#{session_id}"
+  defp session_ndjson_url(session_id), do: "/api/v1/sessions/#{session_id}.ndjson"
 
   defp summarize_message(nil), do: nil
   defp summarize_message(message), do: StatusDashboard.humanize_codex_message(message)
