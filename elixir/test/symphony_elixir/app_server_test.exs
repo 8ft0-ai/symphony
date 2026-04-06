@@ -262,6 +262,105 @@ defmodule SymphonyElixir.AppServerTest do
     end
   end
 
+  test "app server fails fast on MCP elicitation requests without treating them as generic notifications" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-app-server-mcp-elicitation-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      workspace = Path.join(workspace_root, "MT-720")
+      codex_binary = Path.join(test_root, "fake-codex")
+      File.mkdir_p!(workspace)
+
+      File.write!(codex_binary, """
+      #!/bin/sh
+      count=0
+      while IFS= read -r _line; do
+        count=$((count + 1))
+
+        case "$count" in
+          1)
+            printf '%s\\n' '{"id":1,"result":{}}'
+            ;;
+          2)
+            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-720"}}}'
+            ;;
+          3)
+            printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-720"}}}'
+            printf '%s\\n' '{"id":120,"method":"mcpServer/elicitation/request","params":{"serverLabel":"Linear","message":"Allow Save issue?"}}'
+            sleep 5
+            ;;
+          *)
+            sleep 1
+            ;;
+        esac
+      done
+      """)
+
+      File.chmod!(codex_binary, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        codex_command: "#{codex_binary} app-server"
+      )
+
+      issue = %Issue{
+        id: "issue-mcp-elicitation",
+        identifier: "MT-720",
+        title: "MCP elicitation",
+        description: "Ensure unattended MCP elicitation prompts fail fast",
+        state: "In Progress",
+        url: "https://example.org/issues/MT-720",
+        labels: ["backend"]
+      }
+
+      on_message = fn message -> send(self(), {:app_server_message, message}) end
+      started_at = System.monotonic_time(:millisecond)
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          send(
+            self(),
+            {:app_server_result, AppServer.run(workspace, "Handle MCP elicitation", issue, on_message: on_message)}
+          )
+        end)
+
+      assert_received {:app_server_result, {:error, {:mcp_elicitation_required, payload}}}
+
+      elapsed_ms = System.monotonic_time(:millisecond) - started_at
+
+      assert payload["method"] == "mcpServer/elicitation/request"
+      assert elapsed_ms < 4_000
+      assert log =~ "mcp_elicitation_required"
+      refute log =~ "turn_input_required"
+
+      assert_received {:app_server_message,
+                       %{
+                         event: :mcp_elicitation_requested,
+                         payload: %{"method" => "mcpServer/elicitation/request"} = event_payload
+                       }}
+
+      assert get_in(event_payload, ["params", "message"]) == "Allow Save issue?"
+
+      assert_received {:app_server_message,
+                       %{
+                         event: :turn_ended_with_error,
+                         reason: {:mcp_elicitation_required, %{"method" => "mcpServer/elicitation/request"}}
+                       }}
+
+      refute_received {:app_server_message,
+                       %{
+                         event: :notification,
+                         payload: %{"method" => "mcpServer/elicitation/request"}
+                       }}
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "app server fails when command execution approval is required under safer defaults" do
     test_root =
       Path.join(
