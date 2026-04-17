@@ -223,7 +223,8 @@ defmodule SymphonyElixir.Orchestrator do
 
     with :ok <- Config.validate!(),
          {:ok, issues} <- Tracker.fetch_candidate_issues(),
-         true <- available_slots(state) > 0 do
+         true <- available_slots(state) > 0,
+         true <- codex_budget_available?(state) do
       choose_issues(issues, state)
     else
       {:error, :missing_linear_api_token} ->
@@ -804,6 +805,7 @@ defmodule SymphonyElixir.Orchestrator do
             worker_host: worker_host,
             workspace_path: nil,
             session_id: nil,
+            counted_session_id: nil,
             last_codex_message: nil,
             last_codex_timestamp: nil,
             last_codex_event: nil,
@@ -841,29 +843,67 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp handle_normal_worker_exit(state, issue_id, running_entry, session_id) do
     case Map.get(running_entry, :last_reported_disposition) do
-      %RunDisposition{status: :blocked} = disposition ->
-        Logger.warning(
-          "Agent task completed with blocked disposition for issue_id=#{issue_id} " <>
-            "session_id=#{session_id} reason_code=#{disposition.reason_code}"
-        )
+      %RunDisposition{} = disposition ->
+        if budget_wait_disposition?(disposition) do
+          rate_limits = budget_wait_rate_limits(disposition)
 
-        block_issue_from_running(state, issue_id, running_entry, disposition)
+          Logger.info(
+            "Agent task entered budget wait for issue_id=#{issue_id} " <>
+              "session_id=#{session_id}; scheduling retry at the reported reset window"
+          )
+
+          schedule_issue_retry(state, issue_id, 1, %{
+            identifier: running_entry.identifier,
+            error: "waiting for Codex token budget reset",
+            delay_type: :budget_wait,
+            rate_limits: rate_limits,
+            worker_host: Map.get(running_entry, :worker_host),
+            workspace_path: Map.get(running_entry, :workspace_path)
+          })
+        else
+          handle_non_budget_normal_worker_exit(
+            state,
+            issue_id,
+            running_entry,
+            session_id,
+            disposition
+          )
+        end
 
       _ ->
-        Logger.info(
-          "Agent task completed for issue_id=#{issue_id} session_id=#{session_id}; " <>
-            "scheduling active-state continuation check"
-        )
-
-        state
-        |> complete_issue(issue_id)
-        |> schedule_issue_retry(issue_id, 1, %{
-          identifier: running_entry.identifier,
-          delay_type: :continuation,
-          worker_host: Map.get(running_entry, :worker_host),
-          workspace_path: Map.get(running_entry, :workspace_path)
-        })
+        handle_non_budget_normal_worker_exit(state, issue_id, running_entry, session_id, nil)
     end
+  end
+
+  defp handle_non_budget_normal_worker_exit(
+         state,
+         issue_id,
+         running_entry,
+         session_id,
+         %RunDisposition{status: :blocked} = disposition
+       ) do
+    Logger.warning(
+      "Agent task completed with blocked disposition for issue_id=#{issue_id} " <>
+        "session_id=#{session_id} reason_code=#{disposition.reason_code}"
+    )
+
+    block_issue_from_running(state, issue_id, running_entry, disposition)
+  end
+
+  defp handle_non_budget_normal_worker_exit(state, issue_id, running_entry, session_id, _disposition) do
+    Logger.info(
+      "Agent task completed for issue_id=#{issue_id} session_id=#{session_id}; " <>
+        "scheduling active-state continuation check"
+    )
+
+    state
+    |> complete_issue(issue_id)
+    |> schedule_issue_retry(issue_id, 1, %{
+      identifier: running_entry.identifier,
+      delay_type: :continuation,
+      worker_host: Map.get(running_entry, :worker_host),
+      workspace_path: Map.get(running_entry, :workspace_path)
+    })
   end
 
   defp handle_abnormal_worker_exit(state, issue_id, running_entry, session_id, reason) do
@@ -881,6 +921,15 @@ defmodule SymphonyElixir.Orchestrator do
       workspace_path: Map.get(running_entry, :workspace_path)
     })
   end
+
+  defp budget_wait_disposition?(%RunDisposition{reason_code: "budget_wait"}), do: true
+  defp budget_wait_disposition?(_disposition), do: false
+
+  defp budget_wait_rate_limits(%RunDisposition{details: details}) when is_map(details) do
+    Map.get(details, "rate_limits") || Map.get(details, :rate_limits)
+  end
+
+  defp budget_wait_rate_limits(_disposition), do: nil
 
   defp block_issue_from_running(%State{} = state, issue_id, running_entry, %RunDisposition{} = disposition) do
     issue = Map.get(running_entry, :issue)
@@ -981,6 +1030,8 @@ defmodule SymphonyElixir.Orchestrator do
     error = pick_retry_error(previous_retry, metadata)
     worker_host = pick_retry_worker_host(previous_retry, metadata)
     workspace_path = pick_retry_workspace_path(previous_retry, metadata)
+    delay_type = pick_retry_delay_type(previous_retry, metadata)
+    rate_limits = pick_retry_rate_limits(previous_retry, metadata)
 
     if is_reference(old_timer) do
       Process.cancel_timer(old_timer)
@@ -1002,6 +1053,8 @@ defmodule SymphonyElixir.Orchestrator do
             due_at_ms: due_at_ms,
             identifier: identifier,
             error: error,
+            delay_type: delay_type,
+            rate_limits: rate_limits,
             worker_host: worker_host,
             workspace_path: workspace_path
           })
@@ -1014,6 +1067,8 @@ defmodule SymphonyElixir.Orchestrator do
         metadata = %{
           identifier: Map.get(retry_entry, :identifier),
           error: Map.get(retry_entry, :error),
+          delay_type: Map.get(retry_entry, :delay_type),
+          rate_limits: Map.get(retry_entry, :rate_limits),
           worker_host: Map.get(retry_entry, :worker_host),
           workspace_path: Map.get(retry_entry, :workspace_path)
         }
@@ -1100,25 +1155,166 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp handle_active_retry(state, issue, attempt, metadata) do
-    if retry_candidate_issue?(issue, terminal_state_set()) and
-         dispatch_slots_available?(issue, state) and
-         worker_slots_available?(state, metadata[:worker_host]) do
-      {:noreply, dispatch_issue(state, issue, attempt, metadata[:worker_host])}
-    else
-      Logger.debug("No available slots for retrying #{issue_context(issue)}; retrying again")
+    if !codex_budget_available?(state, metadata[:rate_limits]) do
+      Logger.debug("Codex budget still unavailable for #{issue_context(issue)}; retrying when the reset window arrives")
 
       {:noreply,
        schedule_issue_retry(
          state,
          issue.id,
-         attempt + 1,
+         attempt,
          Map.merge(metadata, %{
            identifier: issue.identifier,
-           error: "no available orchestrator slots"
+           error: "waiting for Codex token budget reset",
+           delay_type: :budget_wait,
+           rate_limits: Map.get(state, :codex_rate_limits) || metadata[:rate_limits]
          })
        )}
+    else
+      if retry_candidate_issue?(issue, terminal_state_set()) and
+           dispatch_slots_available?(issue, state) and
+           worker_slots_available?(state, metadata[:worker_host]) do
+        {:noreply, dispatch_issue(state, issue, attempt, metadata[:worker_host])}
+      else
+        Logger.debug("No available slots for retrying #{issue_context(issue)}; retrying again")
+
+        {:noreply,
+         schedule_issue_retry(
+           state,
+           issue.id,
+           attempt + 1,
+           Map.merge(metadata, %{
+             identifier: issue.identifier,
+             error: "no available orchestrator slots"
+           })
+         )}
+      end
     end
   end
+
+  defp pick_retry_delay_type(previous_retry, metadata) do
+    metadata[:delay_type] || Map.get(previous_retry, :delay_type)
+  end
+
+  defp pick_retry_rate_limits(previous_retry, metadata) do
+    metadata[:rate_limits] || Map.get(previous_retry, :rate_limits)
+  end
+
+  defp codex_budget_available?(%State{} = state, fallback_rate_limits \\ nil) do
+    case budget_wait_delay_ms(Map.get(state, :codex_rate_limits) || fallback_rate_limits) do
+      delay_ms when is_integer(delay_ms) and delay_ms > 0 -> false
+      _ -> true
+    end
+  end
+
+  defp budget_wait_delay_ms(rate_limits) when is_map(rate_limits) do
+    now_unix = DateTime.utc_now() |> DateTime.to_unix()
+
+    rate_limits
+    |> exhausted_rate_limit_buckets()
+    |> Enum.map(&bucket_reset_delay_ms(&1, now_unix))
+    |> Enum.reject(&is_nil/1)
+    |> case do
+      [] -> nil
+      delays -> Enum.max(delays) + 1_000
+    end
+  end
+
+  defp budget_wait_delay_ms(_rate_limits), do: nil
+
+  defp exhausted_rate_limit_buckets(rate_limits) when is_map(rate_limits) do
+    [Map.get(rate_limits, "primary") || Map.get(rate_limits, :primary), Map.get(rate_limits, "secondary") || Map.get(rate_limits, :secondary)]
+    |> Enum.filter(&rate_limit_bucket_exhausted?/1)
+  end
+
+  defp exhausted_rate_limit_buckets(_rate_limits), do: []
+
+  defp bucket_reset_delay_ms(bucket, now_unix) when is_map(bucket) and is_integer(now_unix) do
+    case bucket_reset_at(bucket) do
+      reset_at when is_integer(reset_at) and reset_at > now_unix ->
+        (reset_at - now_unix) * 1_000
+
+      _ ->
+        nil
+    end
+  end
+
+  defp bucket_reset_delay_ms(_bucket, _now_unix), do: nil
+
+  defp bucket_reset_at(bucket) when is_map(bucket) do
+    map_first_integer_value(bucket, [
+      "resets_at",
+      :resets_at,
+      "resetsAt",
+      :resetsAt,
+      "reset_at",
+      :reset_at,
+      "resetAt",
+      :resetAt
+    ])
+  end
+
+  defp bucket_reset_at(_bucket), do: nil
+
+  defp rate_limit_bucket_exhausted?(bucket) when is_map(bucket) do
+    used_percent =
+      map_first_number_value(bucket, [
+        "used_percent",
+        :used_percent,
+        "usedPercent",
+        :usedPercent
+      ])
+
+    remaining = map_first_integer_value(bucket, ["remaining", :remaining])
+
+    (is_number(used_percent) and used_percent >= 100.0) or
+      (is_integer(remaining) and remaining <= 0)
+  end
+
+  defp rate_limit_bucket_exhausted?(_bucket), do: false
+
+  defp map_first_integer_value(map, keys) when is_map(map) and is_list(keys) do
+    Enum.find_value(keys, fn key ->
+      case Map.get(map, key) do
+        value when is_integer(value) ->
+          value
+
+        value when is_binary(value) ->
+          case Integer.parse(String.trim(value)) do
+            {integer, _rest} -> integer
+            _ -> nil
+          end
+
+        _ ->
+          nil
+      end
+    end)
+  end
+
+  defp map_first_integer_value(_map, _keys), do: nil
+
+  defp map_first_number_value(map, keys) when is_map(map) and is_list(keys) do
+    Enum.find_value(keys, fn key ->
+      case Map.get(map, key) do
+        value when is_integer(value) ->
+          value * 1.0
+
+        value when is_float(value) ->
+          value
+
+        value when is_binary(value) ->
+          case Float.parse(String.trim(value)) do
+            {number, _rest} -> number
+            _ -> nil
+          end
+
+        _ ->
+          nil
+      end
+    end)
+  end
+
+  defp map_first_number_value(_map, _keys), do: nil
 
   defp clear_blocked_issue(%State{} = state, issue_id) when is_binary(issue_id) do
     if Map.has_key?(state.blocked, issue_id) do
@@ -1142,10 +1338,15 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp retry_delay(attempt, metadata) when is_integer(attempt) and attempt > 0 and is_map(metadata) do
-    if metadata[:delay_type] == :continuation and attempt == 1 do
-      @continuation_retry_delay_ms
-    else
-      failure_retry_delay(attempt)
+    cond do
+      metadata[:delay_type] == :continuation and attempt == 1 ->
+        @continuation_retry_delay_ms
+
+      metadata[:delay_type] == :budget_wait ->
+        budget_wait_delay_ms(metadata[:rate_limits]) || failure_retry_delay(attempt)
+
+      true ->
+        failure_retry_delay(attempt)
     end
   end
 
@@ -1415,12 +1616,15 @@ defmodule SymphonyElixir.Orchestrator do
     last_reported_output = Map.get(running_entry, :codex_last_reported_output_tokens, 0)
     last_reported_total = Map.get(running_entry, :codex_last_reported_total_tokens, 0)
     turn_count = Map.get(running_entry, :turn_count, 0)
+    current_session_id = session_id_for_update(running_entry.session_id, update)
+    counted_session_id = Map.get(running_entry, :counted_session_id)
 
     {
       Map.merge(running_entry, %{
         last_codex_timestamp: timestamp,
         last_codex_message: summarize_codex_update(update),
-        session_id: session_id_for_update(running_entry.session_id, update),
+        session_id: current_session_id,
+        counted_session_id: counted_session_id_for_update(counted_session_id, current_session_id, update),
         last_codex_event: event,
         codex_app_server_pid: codex_app_server_pid_for_update(codex_app_server_pid, update),
         codex_input_tokens: codex_input_tokens + token_delta.input_tokens,
@@ -1429,7 +1633,7 @@ defmodule SymphonyElixir.Orchestrator do
         codex_last_reported_input_tokens: max(last_reported_input, token_delta.input_reported),
         codex_last_reported_output_tokens: max(last_reported_output, token_delta.output_reported),
         codex_last_reported_total_tokens: max(last_reported_total, token_delta.total_reported),
-        turn_count: turn_count_for_update(turn_count, running_entry.session_id, update)
+        turn_count: turn_count_for_update(turn_count, counted_session_id, current_session_id, update)
       }),
       token_delta
     }
@@ -1453,23 +1657,80 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp session_id_for_update(existing, _update), do: existing
 
-  defp turn_count_for_update(existing_count, existing_session_id, %{
-         event: :session_started,
-         session_id: session_id
-       })
-       when is_integer(existing_count) and is_binary(session_id) do
-    if session_id == existing_session_id do
-      existing_count
+  defp counted_session_id_for_update(existing_counted_session_id, current_session_id, update)
+       when is_binary(current_session_id) do
+    if countable_turn_progress_update?(update) do
+      current_session_id
     else
-      existing_count + 1
+      existing_counted_session_id
     end
   end
 
-  defp turn_count_for_update(existing_count, _existing_session_id, _update)
+  defp counted_session_id_for_update(existing_counted_session_id, _current_session_id, _update),
+    do: existing_counted_session_id
+
+  defp turn_count_for_update(existing_count, counted_session_id, current_session_id, update)
+       when is_integer(existing_count) and is_binary(current_session_id) do
+    if countable_turn_progress_update?(update) and current_session_id != counted_session_id do
+      existing_count + 1
+    else
+      existing_count
+    end
+  end
+
+  defp turn_count_for_update(existing_count, _counted_session_id, _current_session_id, _update)
        when is_integer(existing_count),
        do: existing_count
 
-  defp turn_count_for_update(_existing_count, _existing_session_id, _update), do: 0
+  defp turn_count_for_update(_existing_count, _counted_session_id, _current_session_id, _update),
+    do: 0
+
+  defp countable_turn_progress_update?(%{event: :session_started}), do: false
+
+  defp countable_turn_progress_update?(update) when is_map(update) do
+    usage = extract_token_usage(update)
+    payload = update[:payload] || Map.get(update, "payload")
+
+    cond do
+      usage_present?(usage) ->
+        true
+
+      is_map(payload) ->
+        countable_turn_payload?(payload)
+
+      true ->
+        false
+    end
+  end
+
+  defp countable_turn_progress_update?(_update), do: false
+
+  defp countable_turn_payload?(payload) when is_map(payload) do
+    method = Map.get(payload, "method") || Map.get(payload, :method)
+    event_type = payload_event_type(payload)
+
+    cond do
+      method in ["codex/event/token_count", "turn/completed"] ->
+        false
+
+      is_binary(method) ->
+        true
+
+      event_type == "token_count" ->
+        false
+
+      is_binary(event_type) ->
+        true
+
+      true ->
+        false
+    end
+  end
+
+  defp countable_turn_payload?(_payload), do: false
+
+  defp usage_present?(usage) when is_map(usage), do: map_size(usage) > 0
+  defp usage_present?(_usage), do: false
 
   defp summarize_codex_update(update) do
     %{
@@ -1657,8 +1918,11 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp extract_rate_limits(update) do
     rate_limits_from_payload(update[:rate_limits]) ||
+      rate_limits_from_payload(update[:rateLimits]) ||
       rate_limits_from_payload(Map.get(update, "rate_limits")) ||
+      rate_limits_from_payload(Map.get(update, "rateLimits")) ||
       rate_limits_from_payload(Map.get(update, :rate_limits)) ||
+      rate_limits_from_payload(Map.get(update, :rateLimits)) ||
       rate_limits_from_payload(update[:payload]) ||
       rate_limits_from_payload(Map.get(update, "payload")) ||
       rate_limits_from_payload(update)
@@ -1668,8 +1932,12 @@ defmodule SymphonyElixir.Orchestrator do
     absolute_paths = [
       ["params", "msg", "payload", "info", "total_token_usage"],
       [:params, :msg, :payload, :info, :total_token_usage],
+      ["params", "msg", "payload", "info", "totalTokenUsage"],
+      [:params, :msg, :payload, :info, :totalTokenUsage],
       ["params", "msg", "info", "total_token_usage"],
       [:params, :msg, :info, :total_token_usage],
+      ["params", "msg", "info", "totalTokenUsage"],
+      [:params, :msg, :info, :totalTokenUsage],
       ["params", "tokenUsage", "total"],
       [:params, :tokenUsage, :total],
       ["tokenUsage", "total"],
@@ -1698,7 +1966,11 @@ defmodule SymphonyElixir.Orchestrator do
   defp turn_completed_usage_from_payload(_payload), do: nil
 
   defp rate_limits_from_payload(payload) when is_map(payload) do
-    direct = Map.get(payload, "rate_limits") || Map.get(payload, :rate_limits)
+    direct =
+      Map.get(payload, "rate_limits") ||
+        Map.get(payload, :rate_limits) ||
+        Map.get(payload, "rateLimits") ||
+        Map.get(payload, :rateLimits)
 
     cond do
       rate_limits_map?(direct) ->
@@ -1747,19 +2019,13 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp rate_limits_map?(payload) when is_map(payload) do
-    limit_id =
-      Map.get(payload, "limit_id") ||
-        Map.get(payload, :limit_id) ||
-        Map.get(payload, "limit_name") ||
-        Map.get(payload, :limit_name)
-
     has_buckets =
       Enum.any?(
         ["primary", :primary, "secondary", :secondary, "credits", :credits],
         &Map.has_key?(payload, &1)
       )
 
-    !is_nil(limit_id) and has_buckets
+    has_buckets
   end
 
   defp rate_limits_map?(_payload), do: false
@@ -1785,6 +2051,19 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp map_at_path(_payload, _path), do: nil
+
+  defp payload_event_type(payload) when is_map(payload) do
+    case Map.get(payload, "type") || Map.get(payload, :type) do
+      "event_msg" ->
+        nested_payload = Map.get(payload, "payload") || Map.get(payload, :payload) || %{}
+        Map.get(nested_payload, "type") || Map.get(nested_payload, :type)
+
+      other ->
+        other
+    end
+  end
+
+  defp payload_event_type(_payload), do: nil
 
   defp integer_token_map?(payload) do
     token_fields = [

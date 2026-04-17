@@ -183,6 +183,76 @@ defmodule SymphonyElixir.AppServerTest do
     end
   end
 
+  test "app server reports exhausted token budget as a retryable budget wait" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-app-server-budget-wait-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      workspace = Path.join(workspace_root, "MT-1002")
+      codex_binary = Path.join(test_root, "fake-codex")
+      File.mkdir_p!(workspace)
+
+      resets_at = DateTime.to_unix(DateTime.utc_now()) + 90
+
+      File.write!(codex_binary, """
+      #!/bin/sh
+      count=0
+      while IFS= read -r _line; do
+        count=$((count + 1))
+
+        case "$count" in
+          1)
+            printf '%s\\n' '{"id":1,"result":{}}'
+            ;;
+          2)
+            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-1002"}}}'
+            ;;
+          3)
+            printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-1002"}}}'
+            printf '%s\\n' '{"method":"codex/event/token_count","params":{"msg":{"type":"event_msg","payload":{"type":"token_count","rate_limits":{"primary":{"remaining":0,"used_percent":100.0,"resets_at":#{resets_at}},"secondary":{"remaining":44,"used_percent":12.5,"resets_at":#{resets_at}}}}}}}'
+            printf '%s\\n' '{"method":"turn/completed"}'
+            exit 0
+            ;;
+          *)
+            exit 0
+            ;;
+        esac
+      done
+      """)
+
+      File.chmod!(codex_binary, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        codex_command: "#{codex_binary} app-server"
+      )
+
+      issue = %Issue{
+        id: "issue-budget-wait",
+        identifier: "MT-1002",
+        title: "Budget wait",
+        description: "Convert exhausted token budget into a retryable outcome",
+        state: "In Progress",
+        url: "https://example.org/issues/MT-1002",
+        labels: ["backend"]
+      }
+
+      assert {:ok, result} = AppServer.run(workspace, "Handle budget wait", issue)
+      assert result.result.status == :budget_wait
+      assert %RunDisposition{} = result.disposition
+      assert result.disposition.reason_code == "budget_wait"
+      assert result.disposition.retryable == true
+      assert get_in(result.result, [:rate_limits, "primary", "remaining"]) == 0
+      assert get_in(result.disposition.details, ["rate_limits", "primary", "remaining"]) == 0
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "app server marks request-for-input events as a hard failure" do
     test_root =
       Path.join(
