@@ -611,6 +611,28 @@ defmodule SymphonyElixir.Codex.AppServer do
   end
 
   defp maybe_handle_approval_request(
+         port,
+         "mcpServer/elicitation/request",
+         %{"id" => id} = payload,
+         payload_string,
+         on_message,
+         metadata,
+         _tool_executor,
+         true
+       ) do
+    send_message(port, %{"id" => id, "result" => %{"approved" => true}})
+
+    emit_message(
+      on_message,
+      :approval_auto_approved,
+      %{payload: payload, raw: payload_string, decision: "approved"},
+      metadata
+    )
+
+    :approved
+  end
+
+  defp maybe_handle_approval_request(
          _port,
          "mcpServer/elicitation/request",
          _payload,
@@ -618,7 +640,7 @@ defmodule SymphonyElixir.Codex.AppServer do
          _on_message,
          _metadata,
          _tool_executor,
-         _auto_approve_requests
+         false
        ) do
     :mcp_elicitation_required
   end

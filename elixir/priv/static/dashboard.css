@@ -393,6 +393,13 @@ pre,
   font-size: 0.86rem;
 }
 
+.active-toggle {
+  color: var(--ink);
+  font-weight: 700;
+  text-decoration: underline;
+  text-underline-offset: 0.2em;
+}
+
 .issue-links {
   display: flex;
   flex-wrap: wrap;
@@ -473,6 +480,33 @@ pre,
   color: var(--muted);
   font-size: 0.84rem;
   font-weight: 600;
+}
+
+.session-timeline {
+  margin-top: 1rem;
+  display: grid;
+  gap: 0.8rem;
+}
+
+.timeline-event {
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  padding: 0.8rem 0.95rem;
+  background: var(--page-soft);
+}
+
+.timeline-meta {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+  flex-wrap: wrap;
+  color: var(--muted);
+  font-size: 0.83rem;
+}
+
+.timeline-summary {
+  margin: 0.6rem 0 0;
+  line-height: 1.45;
 }
 
 @media (max-width: 860px) {

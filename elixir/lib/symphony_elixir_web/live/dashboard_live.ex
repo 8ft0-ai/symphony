@@ -173,6 +173,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
                     <td>
                       <div class="session-stack">
                         <%= if entry.session_id do %>
+                          <a class="issue-link" href={"/sessions/#{entry.session_id}"}>View session</a>
                           <button
                             type="button"
                             class="subtle-button"

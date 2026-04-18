@@ -415,7 +415,8 @@ defmodule SymphonyElixirWeb.Presenter do
       "latest" => latest?,
       "path" => TranscriptStore.relative_session_path(issue_identifier, session),
       "url" => session_url(session["session_id"]),
-      "ndjson_url" => session_ndjson_url(session["session_id"])
+      "ndjson_url" => session_ndjson_url(session["session_id"]),
+      "ui_url" => session_ui_url(session["session_id"])
     }
   end
 
@@ -513,6 +514,7 @@ defmodule SymphonyElixirWeb.Presenter do
 
   defp transcript_url(issue_identifier), do: "/api/v1/#{issue_identifier}/transcript"
   defp issue_ui_url(issue_identifier), do: "/issues/#{issue_identifier}"
+  defp session_ui_url(session_id), do: "/sessions/#{session_id}"
   defp session_url(session_id), do: "/api/v1/sessions/#{session_id}"
   defp session_ndjson_url(session_id), do: "/api/v1/sessions/#{session_id}.ndjson"
 
