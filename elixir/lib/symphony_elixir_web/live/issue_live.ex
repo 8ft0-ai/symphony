@@ -155,11 +155,11 @@ defmodule SymphonyElixirWeb.IssueLive do
                   </tr>
                 </thead>
                 <tbody>
-                  <tr :for={event <- @payload.transcript.recent_events}>
-                    <td class="mono"><%= event[:at] || "n/a" %></td>
-                    <td><%= event[:event] || "n/a" %></td>
-                    <td class="mono"><%= event[:method] || "n/a" %></td>
-                    <td><%= event[:message] || "n/a" %></td>
+                  <tr :for={event <- condensed_recent_events(@payload.transcript.recent_events)}>
+                    <td class="mono"><%= event[:at] || event["at"] || event["ts"] || "n/a" %></td>
+                    <td><%= event[:event] || event["event"] || "n/a" %></td>
+                    <td class="mono"><%= event[:method] || event["method"] || "n/a" %></td>
+                    <td><%= event[:message] || event["message"] || event["summary"] || "n/a" %></td>
                   </tr>
                 </tbody>
               </table>
@@ -171,7 +171,7 @@ defmodule SymphonyElixirWeb.IssueLive do
           <div class="section-header">
             <div>
               <h2 class="section-title">Session transcript</h2>
-              <p class="section-copy">Select a session to inspect event order, payloads, and download links.</p>
+              <p class="section-copy">Select a session to inspect event order, payloads, and download links. Streaming deltas are condensed for readability.</p>
             </div>
           </div>
 
@@ -196,6 +196,13 @@ defmodule SymphonyElixirWeb.IssueLive do
               </.link>
             </div>
 
+            <% condensed_session_events = condensed_session_events(@payload.events) %>
+
+            <p :if={length(condensed_session_events) < length(@payload.events)} class="empty-state">
+              Showing <span class="mono"><%= length(condensed_session_events) %></span> rows from
+              <span class="mono"><%= length(@payload.events) %></span> raw events.
+            </p>
+
             <div class="table-wrap">
               <table class="data-table data-table-running transcript-table">
                 <colgroup>
@@ -215,7 +222,7 @@ defmodule SymphonyElixirWeb.IssueLive do
                   </tr>
                 </thead>
                 <tbody>
-                  <tr :for={event <- @payload.events}>
+                  <tr :for={event <- condensed_session_events}>
                     <td class="mono numeric"><%= event["sequence"] %></td>
                     <td class="mono"><%= event["ts"] %></td>
                     <td><%= event["event"] %></td>
@@ -409,4 +416,208 @@ defmodule SymphonyElixirWeb.IssueLive do
       true -> base
     end
   end
+
+  defp condensed_recent_events(events) when is_list(events) do
+    events
+    |> Enum.map(&normalize_recent_event/1)
+    |> Enum.reject(&blank_recent_event?/1)
+    |> Enum.reduce(%{rows: [], stream: nil}, fn event, acc ->
+      if streaming_recent_event?(event) do
+        absorb_recent_stream(acc, event)
+      else
+        acc
+        |> flush_recent_stream()
+        |> append_recent_row(event)
+      end
+    end)
+    |> flush_recent_stream()
+    |> Map.fetch!(:rows)
+  end
+
+  defp condensed_recent_events(_events), do: []
+
+  defp condensed_session_events(events) when is_list(events) do
+    events
+    |> Enum.reduce(%{rows: [], stream: nil}, fn event, acc ->
+      if streaming_session_event?(event) do
+        absorb_session_stream(acc, event)
+      else
+        acc
+        |> flush_session_stream()
+        |> append_session_row(event)
+      end
+    end)
+    |> flush_session_stream()
+    |> Map.fetch!(:rows)
+  end
+
+  defp condensed_session_events(_events), do: []
+
+  defp normalize_recent_event(event) do
+    %{
+      at: event[:at] || event["at"] || event["ts"],
+      event: event[:event] || event["event"],
+      method: event[:method] || event["method"],
+      message: event[:message] || event["message"] || event["summary"]
+    }
+  end
+
+  defp blank_recent_event?(%{at: at, event: event, method: method, message: message}) do
+    blankish?(at) and blankish?(event) and blankish?(method) and blankish?(message)
+  end
+
+  defp streaming_recent_event?(%{method: method, message: message}) do
+    method_text = to_string(method || "") |> String.downcase()
+    message_text = to_string(message || "") |> String.downcase()
+
+    String.contains?(method_text, "delta") or
+      String.starts_with?(message_text, "agent message streaming:") or
+      String.starts_with?(message_text, "reasoning streaming:") or
+      String.starts_with?(message_text, "reasoning content streaming:") or
+      String.starts_with?(message_text, "reasoning text streaming:") or
+      String.starts_with?(message_text, "plan streaming:") or
+      String.starts_with?(message_text, "command output streaming:") or
+      String.starts_with?(message_text, "file change output streaming:")
+  end
+
+  defp streaming_session_event?(event) do
+    method_text = to_string(event["method"] || "") |> String.downcase()
+    message_text = to_string(event["summary"] || "") |> String.downcase()
+
+    String.contains?(method_text, "delta") or
+      String.starts_with?(message_text, "agent message streaming:") or
+      String.starts_with?(message_text, "reasoning streaming:") or
+      String.starts_with?(message_text, "reasoning content streaming:") or
+      String.starts_with?(message_text, "reasoning text streaming:") or
+      String.starts_with?(message_text, "plan streaming:") or
+      String.starts_with?(message_text, "command output streaming:") or
+      String.starts_with?(message_text, "file change output streaming:")
+  end
+
+  defp absorb_recent_stream(%{stream: nil} = acc, event) do
+    prefix = stream_prefix(event.message)
+    chunk = stream_chunk(event.message)
+
+    %{acc | stream: %{prefix: prefix, first: event, method: event.method, count: 1, chunks: [chunk]}}
+  end
+
+  defp absorb_recent_stream(%{stream: stream} = acc, event) do
+    prefix = stream_prefix(event.message)
+    chunk = stream_chunk(event.message)
+
+    if stream.method == event.method and stream.prefix == prefix do
+      updated = %{stream | count: stream.count + 1, chunks: [chunk | stream.chunks]}
+      %{acc | stream: updated}
+    else
+      acc
+      |> flush_recent_stream()
+      |> absorb_recent_stream(event)
+    end
+  end
+
+  defp flush_recent_stream(%{stream: nil} = acc), do: acc
+
+  defp flush_recent_stream(%{stream: stream} = acc) do
+    stitched =
+      stream.chunks
+      |> Enum.reverse()
+      |> stitch_stream_chunks()
+
+    message =
+      case stitched do
+        "" -> "#{stream.prefix} (#{stream.count} chunks)"
+        text -> "#{stream.prefix}: #{text} (#{stream.count} chunks)"
+      end
+
+    row =
+      stream.first
+      |> Map.take([:at, :event, :method])
+      |> Map.put(:message, message)
+
+    %{acc | rows: acc.rows ++ [row], stream: nil}
+  end
+
+  defp append_recent_row(acc, event), do: %{acc | rows: acc.rows ++ [event]}
+
+  defp absorb_session_stream(%{stream: nil} = acc, event) do
+    prefix = stream_prefix(event["summary"])
+    chunk = stream_chunk(event["summary"])
+
+    %{acc | stream: %{prefix: prefix, first: event, method: event["method"], count: 1, chunks: [chunk]}}
+  end
+
+  defp absorb_session_stream(%{stream: stream} = acc, event) do
+    prefix = stream_prefix(event["summary"])
+    chunk = stream_chunk(event["summary"])
+
+    if stream.method == event["method"] and stream.prefix == prefix do
+      %{acc | stream: %{stream | count: stream.count + 1, chunks: [chunk | stream.chunks]}}
+    else
+      acc
+      |> flush_session_stream()
+      |> absorb_session_stream(event)
+    end
+  end
+
+  defp flush_session_stream(%{stream: nil} = acc), do: acc
+
+  defp flush_session_stream(%{stream: stream} = acc) do
+    stitched =
+      stream.chunks
+      |> Enum.reverse()
+      |> stitch_stream_chunks()
+
+    summary =
+      case stitched do
+        "" -> "#{stream.prefix} (#{stream.count} chunks)"
+        text -> "#{stream.prefix}: #{text} (#{stream.count} chunks)"
+      end
+
+    row =
+      stream.first
+      |> Map.put("summary", summary)
+      |> Map.put("data", %{
+        "condensed" => true,
+        "count" => stream.count,
+        "first_data" => stream.first["data"]
+      })
+
+    %{acc | rows: acc.rows ++ [row], stream: nil}
+  end
+
+  defp append_session_row(acc, event), do: %{acc | rows: acc.rows ++ [event]}
+
+  defp stream_prefix(message) do
+    text = to_string(message || "")
+
+    case String.split(text, ": ", parts: 2) do
+      [prefix, _chunk] -> prefix
+      _ -> "streaming update"
+    end
+  end
+
+  defp stream_chunk(message) do
+    text = to_string(message || "")
+
+    case String.split(text, ": ", parts: 2) do
+      [_prefix, chunk] -> chunk
+      _ -> ""
+    end
+  end
+
+  defp stitch_stream_chunks(chunks) do
+    chunks
+    |> Enum.map(&String.trim/1)
+    |> Enum.reject(&(&1 == ""))
+    |> Enum.join(" ")
+    |> String.replace(~r/\s+([.,;:!?])/, "\\1")
+    |> String.replace(~r/\s*-\s*/, "-")
+    |> String.replace(" ’ ", "’")
+    |> String.replace(" ' ", "'")
+    |> String.trim()
+  end
+
+  defp blankish?(value) when is_binary(value), do: String.trim(value) == ""
+  defp blankish?(nil), do: true
+  defp blankish?(_), do: false
 end

@@ -785,7 +785,8 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert html =~ "thread-http"
     assert html =~ "thread-http-older"
     assert html =~ "newer note"
-    refute html =~ "older note"
+    assert html =~ "/api/v1/sessions/thread-http"
+    refute html =~ "/api/v1/sessions/thread-http-older"
 
     view
     |> form("#session-selector-form", %{"session_id" => "thread-http-older"})
@@ -834,7 +835,6 @@ defmodule SymphonyElixir.ExtensionsTest do
     {:ok, _view, html} = live(build_conn(), "/sessions/thread-http")
     assert html =~ "Session Conversation"
     assert html =~ "human readable text"
-    assert html =~ "assistant response"
     assert html =~ "(1 events)"
     assert html =~ "/issues/MT-HTTP"
     assert html =~ "/api/v1/sessions/thread-http"
@@ -886,7 +886,7 @@ defmodule SymphonyElixir.ExtensionsTest do
 
     start_test_endpoint(orchestrator: orchestrator_name, snapshot_timeout_ms: 50)
 
-    {:ok, _view, html} = live(build_conn(), "/sessions/#{session_id}")
+    {:ok, _view, html} = live(build_conn(), "/sessions/#{session_id}?tab=debug")
     assert html =~ "mcp startup status updated (3 updates)"
     assert html =~ "Showing"
     assert html =~ "timeline rows from"
@@ -950,17 +950,126 @@ defmodule SymphonyElixir.ExtensionsTest do
 
     start_test_endpoint(orchestrator: orchestrator_name, snapshot_timeout_ms: 50)
 
-    {:ok, _view, condensed_html} = live(build_conn(), "/sessions/#{session_id}")
-    assert condensed_html =~ "assistant response:"
+    {:ok, _view, condensed_html} = live(build_conn(), "/sessions/#{session_id}?tab=debug")
+    assert condensed_html =~ "assistant"
     assert condensed_html =~ "(2 events)"
+    assert condensed_html =~ "Check-in"
+    assert condensed_html =~ "Debug"
     assert condensed_html =~ "view=raw"
 
-    {:ok, _view, raw_html} = live(build_conn(), "/sessions/#{session_id}?view=raw")
+    {:ok, _view, raw_html} = live(build_conn(), "/sessions/#{session_id}?tab=debug&view=raw")
     assert raw_html =~ "agent message streaming: first chunk"
     assert raw_html =~ "agent message streaming: second chunk"
     assert raw_html =~ "view=raw"
     assert raw_html =~ "class=\"issue-link active-toggle\""
-    refute raw_html =~ "assistant response:"
+    refute raw_html =~ "assistant update:"
+  end
+
+  test "session liveview check-in tab hides transport noise by default" do
+    orchestrator_name = Module.concat(__MODULE__, :SessionCheckInScopeOrchestrator)
+    snapshot = static_snapshot()
+    transcripts_root = Path.join(Path.dirname(Workflow.workflow_file_path()), "session-checkin-scope-transcripts")
+
+    {:ok, _pid} =
+      StaticOrchestrator.start_link(
+        name: orchestrator_name,
+        snapshot: snapshot,
+        refresh: %{
+          queued: true,
+          coalesced: true,
+          requested_at: DateTime.utc_now(),
+          operations: ["poll"]
+        }
+      )
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      observability_transcripts_root: transcripts_root
+    )
+
+    issue = %Issue{id: "issue-http", identifier: "MT-HTTP", title: "Scope filter", state: "In Progress"}
+    session_id = "thread-http-scope"
+    base_time = ~U[2026-04-05 12:30:00Z]
+
+    context = %{
+      workspace_path: "/tmp/checkin-scope",
+      session_id: session_id,
+      thread_id: session_id,
+      turn_id: "turn-checkin-scope"
+    }
+
+    [
+      %{event: :session_started, session_id: session_id, thread_id: session_id, turn_id: "turn-checkin-scope", timestamp: base_time},
+      %{event: :notification, payload: %{"method" => "account/rateLimits/updated"}, timestamp: DateTime.add(base_time, 1, :second)},
+      %{event: :notification, payload: %{"method" => "thread/tokenUsage/updated"}, timestamp: DateTime.add(base_time, 2, :second)},
+      %{event: :notification, payload: %{"method" => "item/agentMessage/delta", "params" => %{"delta" => "hello"}}, timestamp: DateTime.add(base_time, 3, :second)},
+      %{event: :turn_completed, payload: %{"method" => "turn/completed"}, timestamp: DateTime.add(base_time, 4, :second)}
+    ]
+    |> Enum.each(fn event ->
+      :ok = TranscriptStore.append(issue, context, event)
+    end)
+
+    start_test_endpoint(orchestrator: orchestrator_name, snapshot_timeout_ms: 50)
+
+    {:ok, _view, checkin_html} = live(build_conn(), "/sessions/#{session_id}")
+    refute checkin_html =~ "rate limits updated"
+    refute checkin_html =~ "thread token usage updated"
+    assert checkin_html =~ "assistant"
+
+    {:ok, _view, all_html} = live(build_conn(), "/sessions/#{session_id}?tab=debug")
+    assert all_html =~ "rate limits updated"
+    assert all_html =~ "thread token usage updated"
+    assert all_html =~ "class=\"issue-link active-toggle\""
+  end
+
+  test "issue transcript recent events collapse streaming deltas into one readable row" do
+    orchestrator_name = Module.concat(__MODULE__, :IssueRecentCondenseOrchestrator)
+    snapshot = static_snapshot()
+    transcripts_root = Path.join(Path.dirname(Workflow.workflow_file_path()), "issue-recent-condense-transcripts")
+
+    {:ok, _pid} =
+      StaticOrchestrator.start_link(
+        name: orchestrator_name,
+        snapshot: snapshot,
+        refresh: %{
+          queued: true,
+          coalesced: true,
+          requested_at: DateTime.utc_now(),
+          operations: ["poll"]
+        }
+      )
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      observability_transcripts_root: transcripts_root
+    )
+
+    issue = %Issue{id: "issue-http", identifier: "MT-HTTP", title: "Recent condense", state: "In Progress"}
+    session_id = "thread-http-recent-condense"
+    base_time = ~U[2026-04-05 13:00:00Z]
+
+    context = %{
+      workspace_path: "/tmp/recent-condense",
+      session_id: session_id,
+      thread_id: session_id,
+      turn_id: "turn-recent-condense"
+    }
+
+    [
+      %{event: :session_started, session_id: session_id, thread_id: session_id, turn_id: "turn-recent-condense", timestamp: base_time},
+      %{event: :notification, payload: %{"method" => "item/agentMessage/delta", "params" => %{"delta" => "hello"}}, timestamp: DateTime.add(base_time, 1, :second)},
+      %{event: :notification, payload: %{"method" => "item/agentMessage/delta", "params" => %{"delta" => "world"}}, timestamp: DateTime.add(base_time, 2, :second)},
+      %{event: :turn_completed, payload: %{"method" => "turn/completed"}, timestamp: DateTime.add(base_time, 3, :second)}
+    ]
+    |> Enum.each(fn event ->
+      :ok = TranscriptStore.append(issue, context, event)
+    end)
+
+    start_test_endpoint(orchestrator: orchestrator_name, snapshot_timeout_ms: 50)
+
+    {:ok, _view, html} = live(build_conn(), "/issues/MT-HTTP")
+    assert html =~ "agent message streaming:"
+    assert html =~ "(2 chunks)"
+    refute html =~ "agent message streaming: hello</td>"
+    refute html =~ "agent message streaming: world</td>"
   end
 
   test "dashboard liveview renders an unavailable state without crashing" do

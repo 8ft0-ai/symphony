@@ -8,8 +8,9 @@ defmodule SymphonyElixirWeb.SessionLive do
   alias SymphonyElixirWeb.{ObservabilityPubSub, Presenter}
 
   @default_limit 100
-  @default_order "asc"
+  @default_order "desc"
   @default_view "condensed"
+  @default_tab "checkin"
   @collapsible_infra_methods MapSet.new([
                               "mcpServer/startupStatus/updated",
                               "thread/status/changed"
@@ -109,6 +110,43 @@ defmodule SymphonyElixirWeb.SessionLive do
         <section class="section-card">
           <div class="section-header">
             <div>
+              <h2 class="section-title">Now</h2>
+              <p class="section-copy">Current run posture and latest meaningful update for quick operator check-ins.</p>
+            </div>
+          </div>
+
+          <div class="metric-grid">
+            <article class="metric-card">
+              <p class="metric-label">Current phase</p>
+              <p class="metric-value"><%= @payload.now.phase %></p>
+              <p class="metric-detail">Latest inferred execution phase.</p>
+            </article>
+
+            <article class="metric-card">
+              <p class="metric-label">Updated</p>
+              <p class="metric-value mono"><%= @payload.now.updated_ago %></p>
+              <p class="metric-detail"><%= @payload.now.last_update_at || "n/a" %></p>
+            </article>
+
+            <article class="metric-card">
+              <p class="metric-label">Health</p>
+              <p class="metric-value"><%= @payload.now.health %></p>
+              <p class="metric-detail"><%= @payload.now.health_reason %></p>
+            </article>
+          </div>
+
+          <div class="timeline-event" style="margin-top: 0.9rem;">
+            <div class="timeline-meta">
+              <span class="state-badge state-badge-active">latest</span>
+              <span class="mono"><%= @payload.now.last_update_method || "n/a" %></span>
+            </div>
+            <p class="timeline-summary"><%= @payload.now.last_update || "No meaningful updates yet." %></p>
+          </div>
+        </section>
+
+        <section class="section-card">
+          <div class="section-header">
+            <div>
               <h2 class="section-title">Links</h2>
               <p class="section-copy">API access for machine-level details when needed.</p>
             </div>
@@ -133,17 +171,31 @@ defmodule SymphonyElixirWeb.SessionLive do
 
             <div class="issue-links">
               <.link
-                patch={session_path(@payload.session["session_id"], Map.put(@payload.query, "view", "condensed"))}
-                class={if(@payload.view_mode == "condensed", do: "issue-link active-toggle", else: "issue-link")}
+                patch={session_path(@payload.session["session_id"], Map.put(@payload.query, "tab", "checkin"))}
+                class={if(@payload.tab_mode == "checkin", do: "issue-link active-toggle", else: "issue-link")}
               >
-                Condensed
+                Check-in
               </.link>
               <.link
-                patch={session_path(@payload.session["session_id"], Map.put(@payload.query, "view", "raw"))}
-                class={if(@payload.view_mode == "raw", do: "issue-link active-toggle", else: "issue-link")}
+                patch={session_path(@payload.session["session_id"], Map.put(@payload.query, "tab", "debug"))}
+                class={if(@payload.tab_mode == "debug", do: "issue-link active-toggle", else: "issue-link")}
               >
-                Raw
+                Debug
               </.link>
+              <%= if @payload.tab_mode == "debug" do %>
+                <.link
+                  patch={session_path(@payload.session["session_id"], Map.put(@payload.query, "view", "condensed"))}
+                  class={if(@payload.view_mode == "condensed", do: "issue-link active-toggle", else: "issue-link")}
+                >
+                  Condensed
+                </.link>
+                <.link
+                  patch={session_path(@payload.session["session_id"], Map.put(@payload.query, "view", "raw"))}
+                  class={if(@payload.view_mode == "raw", do: "issue-link active-toggle", else: "issue-link")}
+                >
+                  Raw
+                </.link>
+              <% end %>
             </div>
           </div>
 
@@ -206,28 +258,36 @@ defmodule SymphonyElixirWeb.SessionLive do
           raw_event_count: 0,
           displayed_event_count: 0,
           condensed_event_count: 0,
+          now: empty_now_snapshot(),
           view_mode: normalize_view_mode(query["view"]),
+          tab_mode: normalize_tab_mode(query["tab"]),
           page: %{cursor: nil, next_cursor: nil, has_more: false},
           query: query
         }
 
       {:ok, payload} ->
         view_mode = normalize_view_mode(query["view"])
+        tab_mode = normalize_tab_mode(query["tab"])
         raw_events = payload.events
         condensed_events = condense_events(raw_events)
         display_events = if(view_mode == "raw", do: raw_events, else: condensed_events)
+        scoped_events = apply_tab_scope(display_events, tab_mode)
+        projected_events = apply_checkin_projection(scoped_events, tab_mode)
         raw_event_count = length(payload.events)
-        displayed_event_count = length(display_events)
+        displayed_event_count = length(projected_events)
+        now_snapshot = build_now_snapshot(payload.session, raw_events, condensed_events)
 
         %{
           error: nil,
           session: payload.session,
           issue_identifier: payload.issue_identifier,
-          events: display_events,
+          events: projected_events,
           raw_event_count: raw_event_count,
           displayed_event_count: displayed_event_count,
           condensed_event_count: max(raw_event_count - displayed_event_count, 0),
+          now: now_snapshot,
           view_mode: view_mode,
+          tab_mode: tab_mode,
           page: payload.page,
           query: query
         }
@@ -241,7 +301,9 @@ defmodule SymphonyElixirWeb.SessionLive do
           raw_event_count: 0,
           displayed_event_count: 0,
           condensed_event_count: 0,
+          now: empty_now_snapshot(),
           view_mode: normalize_view_mode(query["view"]),
+          tab_mode: normalize_tab_mode(query["tab"]),
           page: %{cursor: nil, next_cursor: nil, has_more: false},
           query: query
         }
@@ -253,7 +315,8 @@ defmodule SymphonyElixirWeb.SessionLive do
       "cursor" => Map.get(params, "cursor"),
       "limit" => Map.get(params, "limit", Integer.to_string(@default_limit)),
       "order" => Map.get(params, "order", @default_order),
-      "view" => Map.get(params, "view", @default_view)
+      "view" => Map.get(params, "view", @default_view),
+      "tab" => Map.get(params, "tab", @default_tab)
     }
   end
 
@@ -287,6 +350,16 @@ defmodule SymphonyElixirWeb.SessionLive do
 
   defp normalize_view_mode("raw"), do: "raw"
   defp normalize_view_mode(_view_mode), do: "condensed"
+  defp normalize_tab_mode("debug"), do: "debug"
+  defp normalize_tab_mode(_tab), do: "checkin"
+
+  defp apply_tab_scope(events, "debug"), do: events
+
+  defp apply_tab_scope(events, "checkin") when is_list(events) do
+    Enum.reject(events, &noise_event?/1)
+  end
+
+  defp apply_tab_scope(events, _tab), do: events
 
   defp session_path(session_id, params) do
     query =
@@ -329,6 +402,189 @@ defmodule SymphonyElixirWeb.SessionLive do
   end
 
   defp condense_events(_events), do: []
+
+  defp apply_checkin_projection(events, "checkin") when is_list(events) do
+    Enum.map(events, &project_checkin_event/1)
+  end
+
+  defp apply_checkin_projection(events, _tab), do: events
+
+  defp project_checkin_event(event) do
+    case extract_agent_message_text(event) do
+      nil ->
+        event
+
+      text ->
+        Map.put(event, "summary", "assistant update: #{truncate_text(text, 320)}")
+    end
+  end
+
+  defp build_now_snapshot(session, raw_events, condensed_events) do
+    now = DateTime.utc_now()
+    latest_meaningful = latest_meaningful_event(condensed_events)
+    phase = infer_phase(session, raw_events)
+    last_ts = latest_meaningful && latest_meaningful["ts"]
+    age_seconds = age_seconds(last_ts, now)
+
+    {health, health_reason} = infer_health(session, age_seconds)
+
+    %{
+      phase: phase,
+      last_update: latest_meaningful && latest_meaningful["summary"],
+      last_update_method: latest_meaningful && latest_meaningful["method"],
+      last_update_at: last_ts,
+      updated_ago: format_age(age_seconds),
+      health: health,
+      health_reason: health_reason
+    }
+  end
+
+  defp empty_now_snapshot do
+    %{
+      phase: "unknown",
+      last_update: nil,
+      last_update_method: nil,
+      last_update_at: nil,
+      updated_ago: "n/a",
+      health: "unknown",
+      health_reason: "No session data available."
+    }
+  end
+
+  defp latest_meaningful_event(events) when is_list(events) do
+    events
+    |> apply_tab_scope("checkin")
+    |> apply_checkin_projection("checkin")
+    |> Enum.find(fn event -> not blankish?(event["summary"]) end)
+  end
+
+  defp latest_meaningful_event(_events), do: nil
+
+  defp infer_phase(session, raw_events) do
+    status = to_string(session["status"] || "")
+
+    cond do
+      status in ["completed", "failed", "cancelled"] ->
+        status
+
+      true ->
+        raw_events
+        |> Enum.sort_by(&Map.get(&1, "sequence", 0), :desc)
+        |> Enum.find_value("running", &phase_for_event/1)
+    end
+  end
+
+  defp phase_for_event(event) do
+    method = to_string(event["method"] || "")
+
+    cond do
+      method == "item/started" ->
+        case event_item_type(event) do
+          "reasoning" -> "thinking"
+          "command execution" -> "acting"
+          "dynamic tool call" -> "acting"
+          "tool call" -> "acting"
+          "agent message" -> "communicating"
+          _ -> "running"
+        end
+
+      method in ["item/tool/requestUserInput", "tool/requestUserInput", "mcpServer/elicitation/request"] ->
+        "waiting"
+
+      method == "turn/completed" ->
+        "turn complete"
+
+      true ->
+        nil
+    end
+  end
+
+  defp event_item_type(event) do
+    summary =
+      event["summary"]
+      |> to_string()
+      |> String.downcase()
+
+    cond do
+      String.contains?(summary, "reasoning") -> "reasoning"
+      String.contains?(summary, "command execution") -> "command execution"
+      String.contains?(summary, "dynamic tool call") -> "dynamic tool call"
+      String.contains?(summary, "tool call") -> "tool call"
+      String.contains?(summary, "agent message") -> "agent message"
+      true -> "item"
+    end
+  end
+
+  defp infer_health(session, age_seconds) do
+    status = to_string(session["status"] || "")
+
+    cond do
+      status in ["failed", "cancelled"] ->
+        {"warning", "Session is not running."}
+
+      status == "completed" ->
+        {"healthy", "Session completed."}
+
+      is_integer(age_seconds) and age_seconds > 600 ->
+        {"warning", "No meaningful update for more than 10 minutes."}
+
+      is_integer(age_seconds) and age_seconds > 180 ->
+        {"watch", "No meaningful update for more than 3 minutes."}
+
+      true ->
+        {"healthy", "Recent meaningful updates are flowing."}
+    end
+  end
+
+  defp age_seconds(nil, _now), do: nil
+
+  defp age_seconds(ts, now) when is_binary(ts) do
+    case DateTime.from_iso8601(ts) do
+      {:ok, at, _offset} ->
+        max(DateTime.diff(now, at, :second), 0)
+
+      _ ->
+        nil
+    end
+  end
+
+  defp age_seconds(_ts, _now), do: nil
+
+  defp format_age(nil), do: "n/a"
+  defp format_age(seconds) when seconds < 60, do: "#{seconds}s ago"
+  defp format_age(seconds) when seconds < 3600, do: "#{div(seconds, 60)}m ago"
+  defp format_age(seconds), do: "#{div(seconds, 3600)}h ago"
+
+  defp blankish?(value) when is_binary(value), do: String.trim(value) == ""
+  defp blankish?(nil), do: true
+  defp blankish?(_value), do: false
+
+  defp extract_agent_message_text(event) do
+    with %{} = data <- event["data"],
+         %{} = payload <- data["payload"],
+         "item/completed" <- payload["method"],
+         %{} = params <- payload["params"],
+         %{} = item <- params["item"],
+         "agentMessage" <- item["type"],
+         text when is_binary(text) <- item["text"],
+         trimmed <- String.trim(text),
+         false <- trimmed == "" do
+      trimmed
+    else
+      _ -> nil
+    end
+  end
+
+  defp noise_event?(event) do
+    method = event_method(event)
+
+    method in [
+      "account/rateLimits/updated",
+      "thread/tokenUsage/updated",
+      "thread/status/changed",
+      "mcpServer/startupStatus/updated"
+    ]
+  end
 
   defp streaming_event?(event) do
     method = event_method(event) |> String.downcase()
