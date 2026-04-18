@@ -31,6 +31,6 @@
 
 ## Phase 3: Debuggability and Speed
 
-- [ ] Add per-tab URL state presets and keyboard shortcuts.
-- [ ] Add stronger visual distinction between assistant/action/system/error rows.
-- [ ] Add optional auto-refresh cadence controls.
+- [x] Add per-tab URL state presets and keyboard shortcuts.
+- [x] Add stronger visual distinction between assistant/action/system/error rows.
+- [x] Add optional auto-refresh cadence controls.

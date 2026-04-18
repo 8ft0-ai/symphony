@@ -28,8 +28,47 @@ defmodule SymphonyElixirWeb.Layouts do
 
             if (!window.Phoenix || !window.LiveView) return;
 
+            window.SymphonyHooks = window.SymphonyHooks || {};
+            window.SymphonyHooks.SessionShortcuts = {
+              mounted: function () {
+                var el = this.el;
+
+                this._handler = function (event) {
+                  if (event.defaultPrevented) return;
+                  if (event.metaKey || event.ctrlKey || event.altKey) return;
+                  if (event.target && ["INPUT", "TEXTAREA", "SELECT"].includes(event.target.tagName)) return;
+
+                  var key = String(event.key || "").toLowerCase();
+
+                  if (key === "c") {
+                    var checkin = el.dataset.checkinUrl;
+                    if (checkin) window.location.assign(checkin);
+                    return;
+                  }
+
+                  if (key === "d") {
+                    var debug = el.dataset.debugUrl;
+                    if (debug) window.location.assign(debug);
+                    return;
+                  }
+
+                  if (key === "v") {
+                    var isRaw = new URL(window.location.href).searchParams.get("view") === "raw";
+                    var nextUrl = isRaw ? el.dataset.debugCondensedUrl : el.dataset.debugRawUrl;
+                    if (nextUrl) window.location.assign(nextUrl);
+                  }
+                };
+
+                window.addEventListener("keydown", this._handler);
+              },
+              destroyed: function () {
+                if (this._handler) window.removeEventListener("keydown", this._handler);
+              }
+            };
+
             var liveSocket = new window.LiveView.LiveSocket("/live", window.Phoenix.Socket, {
-              params: {_csrf_token: csrfToken}
+              params: {_csrf_token: csrfToken},
+              hooks: window.SymphonyHooks
             });
 
             liveSocket.connect();

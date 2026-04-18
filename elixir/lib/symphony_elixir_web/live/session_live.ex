@@ -11,10 +11,12 @@ defmodule SymphonyElixirWeb.SessionLive do
   @default_order "desc"
   @default_view "condensed"
   @default_tab "checkin"
+  @default_refresh "off"
+  @refresh_mode_seconds %{"off" => 0, "5s" => 5, "15s" => 15, "30s" => 30}
   @collapsible_infra_methods MapSet.new([
-                              "mcpServer/startupStatus/updated",
-                              "thread/status/changed"
-                            ])
+                               "mcpServer/startupStatus/updated",
+                               "thread/status/changed"
+                             ])
 
   @impl true
   def mount(%{"session_id" => session_id}, _session, socket) do
@@ -26,23 +28,37 @@ defmodule SymphonyElixirWeb.SessionLive do
      socket
      |> assign(:session_id, session_id)
      |> assign(:current_params, %{})
+     |> assign(:auto_refresh_ref, nil)
+     |> assign(:auto_refresh_seconds, 0)
      |> assign(:payload, load_payload(session_id, %{}))}
   end
 
   @impl true
   def handle_params(params, _uri, socket) do
     session_id = Map.get(params, "session_id", socket.assigns.session_id)
+    payload = load_payload(session_id, params)
+    refresh_seconds = refresh_mode_seconds(payload.refresh_mode)
 
     {:noreply,
      socket
      |> assign(:session_id, session_id)
      |> assign(:current_params, Map.drop(params, ["session_id"]))
-     |> assign(:payload, load_payload(session_id, params))}
+     |> assign(:payload, payload)
+     |> assign(:auto_refresh_seconds, refresh_seconds)
+     |> schedule_auto_refresh()}
   end
 
   @impl true
   def handle_info(:observability_updated, socket) do
     {:noreply, assign(socket, :payload, load_payload(socket.assigns.session_id, socket.assigns.current_params))}
+  end
+
+  @impl true
+  def handle_info(:session_auto_refresh, socket) do
+    {:noreply,
+     socket
+     |> assign(:payload, load_payload(socket.assigns.session_id, socket.assigns.current_params))
+     |> schedule_auto_refresh()}
   end
 
   @impl true
@@ -107,7 +123,15 @@ defmodule SymphonyElixirWeb.SessionLive do
           </article>
         </section>
 
-        <section class="section-card">
+        <section
+          class="section-card"
+          phx-hook="SessionShortcuts"
+          id="session-shortcuts"
+          data-checkin-url={session_path(@payload.session["session_id"], Map.merge(@payload.query, %{"tab" => "checkin", "view" => "condensed"}))}
+          data-debug-url={session_path(@payload.session["session_id"], Map.put(@payload.query, "tab", "debug"))}
+          data-debug-condensed-url={session_path(@payload.session["session_id"], Map.merge(@payload.query, %{"tab" => "debug", "view" => "condensed"}))}
+          data-debug-raw-url={session_path(@payload.session["session_id"], Map.merge(@payload.query, %{"tab" => "debug", "view" => "raw"}))}
+        >
           <div class="section-header">
             <div>
               <h2 class="section-title">Now</h2>
@@ -180,6 +204,18 @@ defmodule SymphonyElixirWeb.SessionLive do
 
             <div class="issue-links">
               <.link
+                patch={session_path(@payload.session["session_id"], %{"tab" => "checkin", "view" => "condensed", "order" => "desc", "limit" => "80", "refresh" => "15s"})}
+                class="issue-link"
+              >
+                Check-in preset
+              </.link>
+              <.link
+                patch={session_path(@payload.session["session_id"], %{"tab" => "debug", "view" => "condensed", "order" => "desc", "limit" => "160", "refresh" => "off"})}
+                class="issue-link"
+              >
+                Debug preset
+              </.link>
+              <.link
                 patch={session_path(@payload.session["session_id"], Map.put(@payload.query, "tab", "checkin"))}
                 class={if(@payload.tab_mode == "checkin", do: "issue-link active-toggle", else: "issue-link")}
               >
@@ -205,6 +241,14 @@ defmodule SymphonyElixirWeb.SessionLive do
                   Raw
                 </.link>
               <% end %>
+              <span class="muted">Refresh</span>
+              <.link
+                :for={mode <- ["off", "5s", "15s", "30s"]}
+                patch={session_path(@payload.session["session_id"], Map.put(@payload.query, "refresh", mode))}
+                class={if(@payload.refresh_mode == mode, do: "issue-link active-toggle", else: "issue-link")}
+              >
+                <%= mode %>
+              </.link>
             </div>
           </div>
 
@@ -217,7 +261,7 @@ defmodule SymphonyElixirWeb.SessionLive do
             </p>
 
             <div class="session-timeline">
-              <article :for={event <- @payload.events} class="timeline-event">
+              <article :for={event <- @payload.events} class={timeline_event_class(event)}>
                 <div class="timeline-meta">
                   <span class={timeline_chip_class(event)}><%= timeline_chip_label(event) %></span>
                   <span class="mono">#<%= event["sequence"] %></span>
@@ -277,6 +321,7 @@ defmodule SymphonyElixirWeb.SessionLive do
           warnings: [],
           view_mode: normalize_view_mode(query["view"]),
           tab_mode: normalize_tab_mode(query["tab"]),
+          refresh_mode: normalize_refresh_mode(query["refresh"]),
           page: %{cursor: nil, next_cursor: nil, has_more: false},
           query: query
         }
@@ -307,6 +352,7 @@ defmodule SymphonyElixirWeb.SessionLive do
           warnings: warnings,
           view_mode: view_mode,
           tab_mode: tab_mode,
+          refresh_mode: normalize_refresh_mode(query["refresh"]),
           page: payload.page,
           query: query
         }
@@ -324,6 +370,7 @@ defmodule SymphonyElixirWeb.SessionLive do
           warnings: [],
           view_mode: normalize_view_mode(query["view"]),
           tab_mode: normalize_tab_mode(query["tab"]),
+          refresh_mode: normalize_refresh_mode(query["refresh"]),
           page: %{cursor: nil, next_cursor: nil, has_more: false},
           query: query
         }
@@ -336,7 +383,8 @@ defmodule SymphonyElixirWeb.SessionLive do
       "limit" => Map.get(params, "limit", Integer.to_string(@default_limit)),
       "order" => Map.get(params, "order", @default_order),
       "view" => Map.get(params, "view", @default_view),
-      "tab" => Map.get(params, "tab", @default_tab)
+      "tab" => Map.get(params, "tab", @default_tab),
+      "refresh" => Map.get(params, "refresh", @default_refresh)
     }
   end
 
@@ -372,6 +420,27 @@ defmodule SymphonyElixirWeb.SessionLive do
   defp normalize_view_mode(_view_mode), do: "condensed"
   defp normalize_tab_mode("debug"), do: "debug"
   defp normalize_tab_mode(_tab), do: "checkin"
+  defp normalize_refresh_mode(mode) when mode in ["off", "5s", "15s", "30s"], do: mode
+  defp normalize_refresh_mode(_mode), do: @default_refresh
+
+  defp refresh_mode_seconds(mode), do: Map.get(@refresh_mode_seconds, mode, 0)
+
+  defp schedule_auto_refresh(socket) do
+    if is_reference(socket.assigns[:auto_refresh_ref]) do
+      Process.cancel_timer(socket.assigns.auto_refresh_ref)
+    end
+
+    refresh_seconds = socket.assigns[:auto_refresh_seconds] || 0
+
+    ref =
+      if connected?(socket) and refresh_seconds > 0 do
+        Process.send_after(self(), :session_auto_refresh, refresh_seconds * 1000)
+      else
+        nil
+      end
+
+    assign(socket, :auto_refresh_ref, ref)
+  end
 
   defp apply_tab_scope(events, "debug"), do: events
 
@@ -980,6 +1049,20 @@ defmodule SymphonyElixirWeb.SessionLive do
       "user" -> "#{base} state-badge-warning"
       "system" -> base
       _ -> base
+    end
+  end
+
+  defp timeline_event_class(event) do
+    base = "timeline-event"
+    kind = timeline_chip_label(event)
+
+    cond do
+      event["action_status"] in ["failed", "cancelled"] -> "#{base} timeline-event-error"
+      is_binary(event["action_status"]) -> "#{base} timeline-event-action"
+      kind == "assistant" -> "#{base} timeline-event-assistant"
+      kind == "tool" -> "#{base} timeline-event-tool"
+      kind == "system" -> "#{base} timeline-event-system"
+      true -> base
     end
   end
 

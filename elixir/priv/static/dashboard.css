@@ -495,6 +495,30 @@ pre,
   background: var(--page-soft);
 }
 
+.timeline-event-assistant {
+  border-left: 4px solid rgba(16, 163, 127, 0.45);
+  background: linear-gradient(180deg, #f3fcf8 0%, var(--page-soft) 100%);
+}
+
+.timeline-event-action {
+  border-left: 4px solid rgba(138, 90, 0, 0.35);
+  background: linear-gradient(180deg, #fffaf1 0%, var(--page-soft) 100%);
+}
+
+.timeline-event-tool {
+  border-left: 4px solid rgba(138, 90, 0, 0.28);
+}
+
+.timeline-event-system {
+  border-left: 4px solid rgba(110, 110, 128, 0.35);
+  background: linear-gradient(180deg, #f8f8fb 0%, var(--page-soft) 100%);
+}
+
+.timeline-event-error {
+  border-left: 4px solid rgba(180, 35, 24, 0.55);
+  background: linear-gradient(180deg, #fff6f5 0%, var(--page-soft) 100%);
+}
+
 .timeline-meta {
   display: flex;
   gap: 0.5rem;

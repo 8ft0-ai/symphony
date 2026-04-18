@@ -839,6 +839,11 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert html =~ "Health"
     assert html =~ "human readable text"
     assert html =~ "(1 events)"
+    assert html =~ "Check-in preset"
+    assert html =~ "Debug preset"
+    assert html =~ "Refresh"
+    assert html =~ "data-checkin-url="
+    assert html =~ "SessionShortcuts"
     assert html =~ "/issues/MT-HTTP"
     assert html =~ "/api/v1/sessions/thread-http"
     assert html =~ "/api/v1/sessions/thread-http.ndjson"
@@ -959,6 +964,7 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert condensed_html =~ "Check-in"
     assert condensed_html =~ "Debug"
     assert condensed_html =~ "view=raw"
+    assert condensed_html =~ "timeline-event-assistant"
 
     {:ok, _view, raw_html} = live(build_conn(), "/sessions/#{session_id}?tab=debug&view=raw")
     assert raw_html =~ "agent message streaming: first chunk"
