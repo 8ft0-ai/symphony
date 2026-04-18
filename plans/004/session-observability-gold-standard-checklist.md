@@ -25,8 +25,8 @@
 
 ## Phase 2: Actionable Monitoring
 
-- [ ] Add “stalled” and “looping” heuristics with explicit warning banners.
-- [ ] Add per-action duration and result status chips.
+- [x] Add “stalled” and “looping” heuristics with explicit warning banners.
+- [x] Add per-action duration and result status chips.
 - [ ] Add a compact “What changed since last check” summary.
 
 ## Phase 3: Debuggability and Speed

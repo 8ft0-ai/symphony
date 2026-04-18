@@ -509,6 +509,32 @@ pre,
   line-height: 1.45;
 }
 
+.session-warnings {
+  margin-top: 0.9rem;
+  display: grid;
+  gap: 0.55rem;
+}
+
+.warning-card {
+  border: 1px solid #f1d8a6;
+  background: #fff7e8;
+  border-radius: 12px;
+  padding: 0.6rem 0.75rem;
+}
+
+.warning-title {
+  margin: 0;
+  color: #8a5a00;
+  font-size: 0.87rem;
+  font-weight: 700;
+}
+
+.warning-detail {
+  margin: 0.25rem 0 0;
+  color: #8a5a00;
+  font-size: 0.84rem;
+}
+
 @media (max-width: 860px) {
   .app-shell {
     padding: 1rem 0.85rem 2rem;

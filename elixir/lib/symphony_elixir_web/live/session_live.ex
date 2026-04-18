@@ -142,6 +142,15 @@ defmodule SymphonyElixirWeb.SessionLive do
             </div>
             <p class="timeline-summary"><%= @payload.now.last_update || "No meaningful updates yet." %></p>
           </div>
+
+          <%= if @payload.warnings != [] do %>
+            <div class="session-warnings">
+              <article :for={warning <- @payload.warnings} class="warning-card">
+                <p class="warning-title"><%= warning.title %></p>
+                <p class="warning-detail"><%= warning.detail %></p>
+              </article>
+            </div>
+          <% end %>
         </section>
 
         <section class="section-card">
@@ -214,6 +223,12 @@ defmodule SymphonyElixirWeb.SessionLive do
                   <span class="mono">#<%= event["sequence"] %></span>
                   <span class="mono"><%= event["ts"] %></span>
                   <span class="mono"><%= event["method"] || event["event"] %></span>
+                  <span :if={event["action_status"]} class={"state-badge " <> action_status_chip_class(event["action_status"])}>
+                    <%= event["action_status"] %>
+                  </span>
+                  <span :if={event["action_duration"]} class="state-badge">
+                    <%= event["action_duration"] %>
+                  </span>
                 </div>
                 <p class="timeline-summary"><%= event["summary"] || "n/a" %></p>
                 <details class="event-details">
@@ -259,6 +274,7 @@ defmodule SymphonyElixirWeb.SessionLive do
           displayed_event_count: 0,
           condensed_event_count: 0,
           now: empty_now_snapshot(),
+          warnings: [],
           view_mode: normalize_view_mode(query["view"]),
           tab_mode: normalize_tab_mode(query["tab"]),
           page: %{cursor: nil, next_cursor: nil, has_more: false},
@@ -273,9 +289,11 @@ defmodule SymphonyElixirWeb.SessionLive do
         display_events = if(view_mode == "raw", do: raw_events, else: condensed_events)
         scoped_events = apply_tab_scope(display_events, tab_mode)
         projected_events = apply_checkin_projection(scoped_events, tab_mode)
+        projected_events = enrich_action_events(projected_events, raw_events)
         raw_event_count = length(payload.events)
         displayed_event_count = length(projected_events)
         now_snapshot = build_now_snapshot(payload.session, raw_events, condensed_events)
+        warnings = infer_session_warnings(payload.session, raw_events, now_snapshot)
 
         %{
           error: nil,
@@ -286,6 +304,7 @@ defmodule SymphonyElixirWeb.SessionLive do
           displayed_event_count: displayed_event_count,
           condensed_event_count: max(raw_event_count - displayed_event_count, 0),
           now: now_snapshot,
+          warnings: warnings,
           view_mode: view_mode,
           tab_mode: tab_mode,
           page: payload.page,
@@ -302,6 +321,7 @@ defmodule SymphonyElixirWeb.SessionLive do
           displayed_event_count: 0,
           condensed_event_count: 0,
           now: empty_now_snapshot(),
+          warnings: [],
           view_mode: normalize_view_mode(query["view"]),
           tab_mode: normalize_tab_mode(query["tab"]),
           page: %{cursor: nil, next_cursor: nil, has_more: false},
@@ -451,6 +471,62 @@ defmodule SymphonyElixirWeb.SessionLive do
     }
   end
 
+  defp infer_session_warnings(session, raw_events, now_snapshot) do
+    []
+    |> maybe_add_stalled_warning(now_snapshot)
+    |> maybe_add_loop_warning(raw_events)
+    |> maybe_add_terminal_warning(session)
+  end
+
+  defp maybe_add_stalled_warning(warnings, %{health: "warning", health_reason: reason}) do
+    warnings ++ [%{title: "Stalled", detail: reason}]
+  end
+
+  defp maybe_add_stalled_warning(warnings, _now_snapshot), do: warnings
+
+  defp maybe_add_loop_warning(warnings, raw_events) do
+    command_starts =
+      raw_events
+      |> Enum.sort_by(&Map.get(&1, "sequence", 0), :desc)
+      |> Enum.take(80)
+      |> Enum.count(fn event ->
+        method = to_string(event["method"] || "")
+        summary = to_string(event["summary"] || "") |> String.downcase()
+        method == "item/started" and String.contains?(summary, "command execution")
+      end)
+
+    tool_calls =
+      raw_events
+      |> Enum.sort_by(&Map.get(&1, "sequence", 0), :desc)
+      |> Enum.take(80)
+      |> Enum.count(fn event ->
+        method = to_string(event["method"] || "")
+        summary = to_string(event["summary"] || "") |> String.downcase()
+        method == "item/tool/call" or String.contains?(summary, "dynamic tool call requested")
+      end)
+
+    cond do
+      command_starts >= 12 ->
+        warnings ++ [%{title: "Loop risk", detail: "High command churn detected in recent events."}]
+
+      tool_calls >= 8 ->
+        warnings ++ [%{title: "Loop risk", detail: "Repeated tool calls detected in recent events."}]
+
+      true ->
+        warnings
+    end
+  end
+
+  defp maybe_add_terminal_warning(warnings, session) do
+    status = to_string(session["status"] || "")
+
+    if status in ["failed", "cancelled"] do
+      warnings ++ [%{title: "Terminal state", detail: "Session ended as #{status}."}]
+    else
+      warnings
+    end
+  end
+
   defp latest_meaningful_event(events) when is_list(events) do
     events
     |> apply_tab_scope("checkin")
@@ -558,6 +634,89 @@ defmodule SymphonyElixirWeb.SessionLive do
   defp blankish?(value) when is_binary(value), do: String.trim(value) == ""
   defp blankish?(nil), do: true
   defp blankish?(_value), do: false
+
+  defp enrich_action_events(events, raw_events) when is_list(events) and is_list(raw_events) do
+    starts = action_start_times(raw_events)
+
+    Enum.map(events, fn event ->
+      with %{} = payload <- event_payload(event),
+           "item/completed" <- payload["method"],
+           %{} = params <- payload["params"],
+           %{} = item <- params["item"] do
+        item_id = item["id"]
+        status = item["status"] || completed_status_from_summary(event["summary"])
+        duration = action_duration(starts, item_id, event["ts"])
+
+        event
+        |> maybe_put_action_status(status)
+        |> maybe_put_action_duration(duration)
+      else
+        _ -> event
+      end
+    end)
+  end
+
+  defp enrich_action_events(events, _raw_events), do: events
+
+  defp action_start_times(raw_events) do
+    Enum.reduce(raw_events, %{}, fn event, acc ->
+      with %{} = payload <- event_payload(event),
+           "item/started" <- payload["method"],
+           %{} = params <- payload["params"],
+           %{} = item <- params["item"],
+           item_id when is_binary(item_id) <- item["id"],
+           {:ok, ts, _offset} <- DateTime.from_iso8601(to_string(event["ts"] || "")) do
+        Map.put_new(acc, item_id, ts)
+      else
+        _ -> acc
+      end
+    end)
+  end
+
+  defp event_payload(event) do
+    case event["data"] do
+      %{"payload" => %{} = payload} -> payload
+      _ -> nil
+    end
+  end
+
+  defp action_duration(starts, item_id, completed_ts) when is_binary(item_id) and is_binary(completed_ts) do
+    with %DateTime{} = started_at <- Map.get(starts, item_id),
+         {:ok, completed_at, _offset} <- DateTime.from_iso8601(completed_ts) do
+      ms = max(DateTime.diff(completed_at, started_at, :millisecond), 0)
+      format_duration(ms)
+    else
+      _ -> nil
+    end
+  end
+
+  defp action_duration(_starts, _item_id, _completed_ts), do: nil
+
+  defp format_duration(ms) when ms < 1000, do: "#{ms}ms"
+  defp format_duration(ms), do: "#{Float.round(ms / 1000, 1)}s"
+
+  defp maybe_put_action_status(event, status) when is_binary(status) and status != "",
+    do: Map.put(event, "action_status", String.downcase(status))
+
+  defp maybe_put_action_status(event, _status), do: event
+
+  defp maybe_put_action_duration(event, duration) when is_binary(duration),
+    do: Map.put(event, "action_duration", duration)
+
+  defp maybe_put_action_duration(event, _duration), do: event
+
+  defp completed_status_from_summary(summary) when is_binary(summary) do
+    down = String.downcase(summary)
+
+    cond do
+      String.contains?(down, "failed") -> "failed"
+      String.contains?(down, "cancelled") -> "cancelled"
+      String.contains?(down, "completed") -> "completed"
+      true -> nil
+    end
+  end
+
+  defp completed_status_from_summary(_summary), do: nil
 
   defp extract_agent_message_text(event) do
     with %{} = data <- event["data"],
@@ -803,6 +962,11 @@ defmodule SymphonyElixirWeb.SessionLive do
       _ -> base
     end
   end
+
+  defp action_status_chip_class("completed"), do: "state-badge-active"
+  defp action_status_chip_class("failed"), do: "state-badge-danger"
+  defp action_status_chip_class("cancelled"), do: "state-badge-warning"
+  defp action_status_chip_class(_status), do: "state-badge-warning"
 
   defp state_badge_class(state) do
     base = "state-badge"

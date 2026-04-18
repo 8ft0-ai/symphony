@@ -834,6 +834,9 @@ defmodule SymphonyElixir.ExtensionsTest do
 
     {:ok, _view, html} = live(build_conn(), "/sessions/thread-http")
     assert html =~ "Session Conversation"
+    assert html =~ "Now"
+    assert html =~ "Current phase"
+    assert html =~ "Health"
     assert html =~ "human readable text"
     assert html =~ "(1 events)"
     assert html =~ "/issues/MT-HTTP"
@@ -1019,6 +1022,53 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert all_html =~ "rate limits updated"
     assert all_html =~ "thread token usage updated"
     assert all_html =~ "class=\"issue-link active-toggle\""
+  end
+
+  test "session liveview now card surfaces stalled warning when no meaningful updates for long interval" do
+    orchestrator_name = Module.concat(__MODULE__, :SessionStalledWarningOrchestrator)
+    snapshot = static_snapshot()
+    transcripts_root = Path.join(Path.dirname(Workflow.workflow_file_path()), "session-stalled-warning-transcripts")
+
+    {:ok, _pid} =
+      StaticOrchestrator.start_link(
+        name: orchestrator_name,
+        snapshot: snapshot,
+        refresh: %{
+          queued: true,
+          coalesced: true,
+          requested_at: DateTime.utc_now(),
+          operations: ["poll"]
+        }
+      )
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      observability_transcripts_root: transcripts_root
+    )
+
+    issue = %Issue{id: "issue-http", identifier: "MT-HTTP", title: "Stalled warning", state: "In Progress"}
+    session_id = "thread-http-stalled"
+    base_time = ~U[2026-04-05 06:00:00Z]
+
+    context = %{
+      workspace_path: "/tmp/stalled-warning",
+      session_id: session_id,
+      thread_id: session_id,
+      turn_id: "turn-stalled-warning"
+    }
+
+    [
+      %{event: :session_started, session_id: session_id, thread_id: session_id, turn_id: "turn-stalled-warning", timestamp: base_time},
+      %{event: :notification, payload: %{"method" => "turn/started"}, timestamp: DateTime.add(base_time, 1, :second)}
+    ]
+    |> Enum.each(fn event ->
+      :ok = TranscriptStore.append(issue, context, event)
+    end)
+
+    start_test_endpoint(orchestrator: orchestrator_name, snapshot_timeout_ms: 50)
+
+    {:ok, _view, html} = live(build_conn(), "/sessions/#{session_id}")
+    assert html =~ "Stalled"
+    assert html =~ "No meaningful update for more than 10 minutes."
   end
 
   test "issue transcript recent events collapse streaming deltas into one readable row" do
