@@ -1024,6 +1024,129 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert all_html =~ "class=\"issue-link active-toggle\""
   end
 
+  test "session liveview surfaces action status and duration chips for paired command events" do
+    orchestrator_name = Module.concat(__MODULE__, :SessionActionDurationOrchestrator)
+    snapshot = static_snapshot()
+    transcripts_root = Path.join(Path.dirname(Workflow.workflow_file_path()), "session-action-duration-transcripts")
+
+    {:ok, _pid} =
+      StaticOrchestrator.start_link(
+        name: orchestrator_name,
+        snapshot: snapshot,
+        refresh: %{
+          queued: true,
+          coalesced: true,
+          requested_at: DateTime.utc_now(),
+          operations: ["poll"]
+        }
+      )
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      observability_transcripts_root: transcripts_root
+    )
+
+    issue = %Issue{id: "issue-http", identifier: "MT-HTTP", title: "Action chips", state: "In Progress"}
+    session_id = "thread-http-action-duration"
+    base_time = ~U[2026-04-05 12:45:00Z]
+
+    context = %{
+      workspace_path: "/tmp/action-duration",
+      session_id: session_id,
+      thread_id: session_id,
+      turn_id: "turn-action-duration"
+    }
+
+    [
+      %{event: :session_started, session_id: session_id, thread_id: session_id, turn_id: "turn-action-duration", timestamp: base_time},
+      %{
+        event: :notification,
+        payload: %{
+          "method" => "item/started",
+          "params" => %{
+            "item" => %{"type" => "commandExecution", "id" => "call-action", "status" => "in_progress"}
+          }
+        },
+        timestamp: DateTime.add(base_time, 1, :second)
+      },
+      %{
+        event: :notification,
+        payload: %{
+          "method" => "item/completed",
+          "params" => %{
+            "item" => %{"type" => "commandExecution", "id" => "call-action", "status" => "completed"}
+          }
+        },
+        timestamp: DateTime.add(base_time, 2, :second)
+      }
+    ]
+    |> Enum.each(fn event ->
+      :ok = TranscriptStore.append(issue, context, event)
+    end)
+
+    start_test_endpoint(orchestrator: orchestrator_name, snapshot_timeout_ms: 50)
+
+    {:ok, view, _html} = live(build_conn(), "/sessions/#{session_id}")
+    assert has_element?(view, ".timeline-meta .state-badge.state-badge-warning", "inprogress")
+    assert has_element?(view, ".timeline-meta .state-badge.state-badge-active", "completed")
+    assert render(view) =~ "1.0s"
+  end
+
+  test "session liveview omits duration chip when completion has no matching start" do
+    orchestrator_name = Module.concat(__MODULE__, :SessionActionMissingStartOrchestrator)
+    snapshot = static_snapshot()
+    transcripts_root = Path.join(Path.dirname(Workflow.workflow_file_path()), "session-action-missing-start-transcripts")
+
+    {:ok, _pid} =
+      StaticOrchestrator.start_link(
+        name: orchestrator_name,
+        snapshot: snapshot,
+        refresh: %{
+          queued: true,
+          coalesced: true,
+          requested_at: DateTime.utc_now(),
+          operations: ["poll"]
+        }
+      )
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      observability_transcripts_root: transcripts_root
+    )
+
+    issue = %Issue{id: "issue-http", identifier: "MT-HTTP", title: "Missing start", state: "In Progress"}
+    session_id = "thread-http-missing-start"
+    base_time = ~U[2026-04-05 12:50:00Z]
+
+    context = %{
+      workspace_path: "/tmp/missing-start",
+      session_id: session_id,
+      thread_id: session_id,
+      turn_id: "turn-missing-start"
+    }
+
+    [
+      %{event: :session_started, session_id: session_id, thread_id: session_id, turn_id: "turn-missing-start", timestamp: base_time},
+      %{
+        event: :notification,
+        payload: %{
+          "method" => "item/completed",
+          "params" => %{
+            "item" => %{"type" => "commandExecution", "id" => "call-orphan", "status" => "completed"}
+          }
+        },
+        timestamp: DateTime.add(base_time, 2, :second)
+      }
+    ]
+    |> Enum.each(fn event ->
+      :ok = TranscriptStore.append(issue, context, event)
+    end)
+
+    start_test_endpoint(orchestrator: orchestrator_name, snapshot_timeout_ms: 50)
+
+    {:ok, view, _html} = live(build_conn(), "/sessions/#{session_id}")
+    assert has_element?(view, ".timeline-meta .state-badge.state-badge-active", "completed")
+    refute render(view) =~ "n/a"
+  end
+
   test "session liveview now card surfaces stalled warning when no meaningful updates for long interval" do
     orchestrator_name = Module.concat(__MODULE__, :SessionStalledWarningOrchestrator)
     snapshot = static_snapshot()

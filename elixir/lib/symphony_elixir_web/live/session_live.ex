@@ -642,7 +642,8 @@ defmodule SymphonyElixirWeb.SessionLive do
       with %{} = payload <- event_payload(event),
            "item/completed" <- payload["method"],
            %{} = params <- payload["params"],
-           %{} = item <- params["item"] do
+           %{} = item <- params["item"],
+           true <- actionable_item?(item) do
         item_id = item["id"]
         status = item["status"] || completed_status_from_summary(event["summary"])
         duration = action_duration(starts, item_id, event["ts"])
@@ -651,7 +652,8 @@ defmodule SymphonyElixirWeb.SessionLive do
         |> maybe_put_action_status(status)
         |> maybe_put_action_duration(duration)
       else
-        _ -> event
+        _ ->
+          maybe_mark_inprogress_action(event)
       end
     end)
   end
@@ -717,6 +719,24 @@ defmodule SymphonyElixirWeb.SessionLive do
   end
 
   defp completed_status_from_summary(_summary), do: nil
+
+  defp maybe_mark_inprogress_action(event) do
+    with %{} = payload <- event_payload(event),
+         "item/started" <- payload["method"],
+         %{} = params <- payload["params"],
+         %{} = item <- params["item"],
+         true <- actionable_item?(item) do
+      maybe_put_action_status(event, "inprogress")
+    else
+      _ -> event
+    end
+  end
+
+  defp actionable_item?(%{"type" => type}) when is_binary(type) do
+    type in ["commandExecution", "dynamicToolCall", "mcpToolCall"]
+  end
+
+  defp actionable_item?(_item), do: false
 
   defp extract_agent_message_text(event) do
     with %{} = data <- event["data"],
@@ -964,6 +984,7 @@ defmodule SymphonyElixirWeb.SessionLive do
   end
 
   defp action_status_chip_class("completed"), do: "state-badge-active"
+  defp action_status_chip_class("inprogress"), do: "state-badge-warning"
   defp action_status_chip_class("failed"), do: "state-badge-danger"
   defp action_status_chip_class("cancelled"), do: "state-badge-warning"
   defp action_status_chip_class(_status), do: "state-badge-warning"
