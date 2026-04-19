@@ -101,6 +101,110 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
            }
   end
 
+  test "orchestrator defers turn counting until a session makes substantive progress" do
+    issue_id = "issue-budget-wait-progress"
+
+    issue = %Issue{
+      id: issue_id,
+      identifier: "MT-219",
+      title: "Deferred turn counting",
+      description: "Do not count budget-wait sessions as turns",
+      state: "In Progress",
+      url: "https://example.org/issues/MT-219"
+    }
+
+    orchestrator_name = Module.concat(__MODULE__, :DeferredTurnCountOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    initial_state = :sys.get_state(pid)
+    started_at = DateTime.utc_now()
+
+    running_entry = %{
+      pid: self(),
+      ref: make_ref(),
+      identifier: issue.identifier,
+      issue: issue,
+      session_id: nil,
+      turn_count: 0,
+      last_codex_message: nil,
+      last_codex_timestamp: nil,
+      last_codex_event: nil,
+      started_at: started_at
+    }
+
+    :sys.replace_state(pid, fn _ ->
+      initial_state
+      |> Map.put(:running, %{issue_id => running_entry})
+      |> Map.put(:claimed, MapSet.put(initial_state.claimed, issue_id))
+    end)
+
+    session_id = "thread-budget-wait-turn-1"
+
+    send(
+      pid,
+      {:codex_worker_update, issue_id,
+       %{
+         event: :session_started,
+         session_id: session_id,
+         timestamp: DateTime.utc_now()
+       }}
+    )
+
+    now_unix = DateTime.to_unix(DateTime.utc_now())
+
+    rate_limits = %{
+      "primary" => %{"remaining" => 0, "used_percent" => 100.0, "resets_at" => now_unix + 60},
+      "secondary" => %{"remaining" => 12, "used_percent" => 4.0, "resets_at" => now_unix + 120}
+    }
+
+    send(
+      pid,
+      {:codex_worker_update, issue_id,
+       %{
+         event: :notification,
+         payload: %{
+           "method" => "codex/event/token_count",
+           "params" => %{
+             "msg" => %{
+               "type" => "event_msg",
+               "payload" => %{
+                 "type" => "token_count",
+                 "rate_limits" => rate_limits
+               }
+             }
+           }
+         },
+         timestamp: DateTime.utc_now()
+       }}
+    )
+
+    snapshot = GenServer.call(pid, :snapshot)
+    assert %{running: [snapshot_entry]} = snapshot
+    assert snapshot_entry.session_id == session_id
+    assert snapshot_entry.turn_count == 0
+    assert snapshot.rate_limits == rate_limits
+
+    send(
+      pid,
+      {:codex_worker_update, issue_id,
+       %{
+         event: :notification,
+         payload: %{method: "some-event"},
+         timestamp: DateTime.utc_now()
+       }}
+    )
+
+    snapshot = GenServer.call(pid, :snapshot)
+    assert %{running: [snapshot_entry]} = snapshot
+    assert snapshot_entry.turn_count == 1
+  end
+
   test "orchestrator snapshot tracks codex thread totals and app-server pid" do
     issue_id = "issue-usage-snapshot"
 
@@ -387,7 +491,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert completed_state.codex_totals.total_tokens == 15
   end
 
-  test "orchestrator snapshot tracks codex rate-limit payloads" do
+  test "orchestrator snapshot tracks codex rate-limit payloads without requiring limit metadata" do
     issue_id = "issue-rate-limit-snapshot"
 
     issue = %Issue{
@@ -437,7 +541,6 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     end)
 
     rate_limits = %{
-      "limit_id" => "codex",
       "primary" => %{"remaining" => 90, "limit" => 100},
       "secondary" => nil,
       "credits" => %{"has_credits" => false, "unlimited" => false, "balance" => nil}

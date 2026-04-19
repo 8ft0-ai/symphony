@@ -138,6 +138,57 @@ defmodule SymphonyElixir.TranscriptStoreTest do
     end
   end
 
+  test "accepts ISO8601 string timestamps when appending events" do
+    transcripts_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-transcript-store-string-ts-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      write_workflow_file!(Workflow.workflow_file_path(),
+        observability_transcripts_root: transcripts_root
+      )
+
+      issue = %Issue{
+        id: "issue-transcript-string-ts",
+        identifier: "MT-504",
+        title: "Persist transcript from string timestamp",
+        state: "In Progress"
+      }
+
+      context = %{
+        workspace_path: "/tmp/transcript-string-ts",
+        worker_host: "worker-string-ts",
+        session_id: "thread-504-turn-1",
+        thread_id: "thread-504",
+        turn_id: "turn-1"
+      }
+
+      ts = "2026-04-18T06:58:31.843613Z"
+
+      assert :ok =
+               TranscriptStore.append(issue, context, %{
+                 event: :session_started,
+                 session_id: context.session_id,
+                 thread_id: context.thread_id,
+                 turn_id: context.turn_id,
+                 timestamp: ts
+               })
+
+      manifest = TranscriptStore.manifest_path(issue.identifier) |> File.read!() |> Jason.decode!()
+      assert [%{"session_id" => "thread-504-turn-1"} = session] = manifest["sessions"]
+      assert session["started_at"] == ts
+
+      session_path = TranscriptStore.session_path(issue.identifier, session)
+      [line] = session_path |> File.read!() |> String.split("\n", trim: true)
+      event = Jason.decode!(line)
+      assert event["ts"] == ts
+    after
+      File.rm_rf(transcripts_root)
+    end
+  end
+
   test "reads paginated session events and recent issue events" do
     transcripts_root =
       Path.join(

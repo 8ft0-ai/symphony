@@ -585,6 +585,72 @@ defmodule SymphonyElixir.CoreTest do
     assert_due_in_range(due_at_ms, 200, 1_100)
   end
 
+  test "budget wait worker exit schedules retry at the reported reset window without consuming completion state" do
+    issue_id = "issue-budget-wait"
+    ref = make_ref()
+    orchestrator_name = Module.concat(__MODULE__, :BudgetWaitExitOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    initial_state = :sys.get_state(pid)
+    now_unix = DateTime.to_unix(DateTime.utc_now())
+
+    running_entry = %{
+      pid: self(),
+      ref: ref,
+      identifier: "MT-558B",
+      worker_host: "worker-a",
+      workspace_path: "/tmp/MT-558B",
+      issue: %Issue{id: issue_id, identifier: "MT-558B", state: "In Progress"},
+      started_at: DateTime.utc_now()
+    }
+
+    :sys.replace_state(pid, fn _ ->
+      initial_state
+      |> Map.put(:running, %{issue_id => running_entry})
+      |> Map.put(:claimed, MapSet.new([issue_id]))
+      |> Map.put(:retry_attempts, %{})
+    end)
+
+    send(
+      pid,
+      {:agent_run_disposition, issue_id,
+       RunDisposition.failed("budget_wait", %{
+         summary: "Codex token budget was exhausted before the turn made progress.",
+         retryable: true,
+         details: %{
+           "rate_limits" => %{
+             "primary" => %{"remaining" => 0, "used_percent" => 100.0, "resets_at" => now_unix + 2},
+             "secondary" => %{"remaining" => 10, "used_percent" => 12.0, "resets_at" => now_unix + 120}
+           }
+         }
+       })}
+    )
+
+    send(pid, {:DOWN, ref, :process, self(), :normal})
+    Process.sleep(50)
+    state = :sys.get_state(pid)
+
+    refute Map.has_key?(state.running, issue_id)
+    refute MapSet.member?(state.completed, issue_id)
+    assert MapSet.member?(state.claimed, issue_id)
+
+    assert %{
+             attempt: 1,
+             due_at_ms: due_at_ms,
+             error: "waiting for Codex token budget reset",
+             worker_host: "worker-a",
+             workspace_path: "/tmp/MT-558B"
+           } = state.retry_attempts[issue_id]
+
+    assert_due_in_range(due_at_ms, 1_000, 4_000)
+  end
+
   test "blocked worker exit does not schedule continuation and persists blocked state" do
     issue_id = "issue-blocked"
     ref = make_ref()
@@ -1928,6 +1994,123 @@ defmodule SymphonyElixir.CoreTest do
       refute Enum.at(turn_texts, 1) =~ "You are an agent for this repository."
       assert Enum.at(turn_texts, 1) =~ "Continuation guidance:"
       assert Enum.at(turn_texts, 1) =~ "continuation turn #2 of 3"
+    after
+      System.delete_env("SYMP_TEST_CODEx_TRACE")
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "agent runner stops after a budget-wait turn instead of consuming a continuation turn" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-agent-runner-budget-wait-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      template_repo = Path.join(test_root, "source")
+      workspace_root = Path.join(test_root, "workspaces")
+      codex_binary = Path.join(test_root, "fake-codex")
+      trace_file = Path.join(test_root, "codex.trace")
+      resets_at = DateTime.to_unix(DateTime.utc_now()) + 90
+
+      File.mkdir_p!(template_repo)
+      File.write!(Path.join(template_repo, "README.md"), "# test")
+      System.cmd("git", ["-C", template_repo, "init", "-b", "main"])
+      System.cmd("git", ["-C", template_repo, "config", "user.name", "Test User"])
+      System.cmd("git", ["-C", template_repo, "config", "user.email", "test@example.com"])
+      System.cmd("git", ["-C", template_repo, "add", "README.md"])
+      System.cmd("git", ["-C", template_repo, "commit", "-m", "initial"])
+
+      File.write!(codex_binary, """
+      #!/bin/sh
+      trace_file="${SYMP_TEST_CODEx_TRACE:-/tmp/codex.trace}"
+      run_id="$(date +%s%N)-$$"
+      printf 'RUN:%s\\n' "$run_id" >> "$trace_file"
+      count=0
+
+      while IFS= read -r line; do
+        count=$((count + 1))
+        printf 'JSON:%s\\n' "$line" >> "$trace_file"
+
+        case "$count" in
+          1)
+            printf '%s\\n' '{"id":1,"result":{}}'
+            ;;
+          2)
+            ;;
+          3)
+            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-budget-wait"}}}'
+            ;;
+          4)
+            printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-budget-wait-1"}}}'
+            printf '%s\\n' '{"method":"codex/event/token_count","params":{"msg":{"type":"event_msg","payload":{"type":"token_count","rate_limits":{"primary":{"remaining":0,"used_percent":100.0,"resets_at":#{resets_at}},"secondary":{"remaining":25,"used_percent":10.0,"resets_at":#{resets_at}}}}}}}'
+            printf '%s\\n' '{"method":"turn/completed"}'
+            exit 0
+            ;;
+          *)
+            exit 0
+            ;;
+        esac
+      done
+      """)
+
+      File.chmod!(codex_binary, 0o755)
+      System.put_env("SYMP_TEST_CODEx_TRACE", trace_file)
+
+      on_exit(fn -> System.delete_env("SYMP_TEST_CODEx_TRACE") end)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        hook_after_create: "cp #{Path.join(template_repo, "README.md")} README.md",
+        codex_command: "#{codex_binary} app-server",
+        max_turns: 3
+      )
+
+      parent = self()
+
+      state_fetcher = fn [_issue_id] ->
+        send(parent, :issue_state_fetch_called)
+
+        {:ok,
+         [
+           %Issue{
+             id: "issue-budget-wait-runner",
+             identifier: "MT-248",
+             title: "Budget wait",
+             description: "Stop after budget exhaustion",
+             state: "In Progress"
+           }
+         ]}
+      end
+
+      issue = %Issue{
+        id: "issue-budget-wait-runner",
+        identifier: "MT-248",
+        title: "Budget wait",
+        description: "Stop after budget exhaustion",
+        state: "In Progress",
+        url: "https://example.org/issues/MT-248",
+        labels: []
+      }
+
+      assert :ok = AgentRunner.run(issue, self(), issue_state_fetcher: state_fetcher)
+
+      assert_receive {:agent_run_disposition, "issue-budget-wait-runner", disposition}, 1_000
+      assert disposition.reason_code == "budget_wait"
+      assert disposition.retryable == true
+      refute_receive :issue_state_fetch_called, 200
+
+      lines = File.read!(trace_file) |> String.split("\n", trim: true)
+
+      turn_starts =
+        lines
+        |> Enum.filter(&String.starts_with?(&1, "JSON:"))
+        |> Enum.map(&String.trim_leading(&1, "JSON:"))
+        |> Enum.map(&Jason.decode!/1)
+        |> Enum.filter(&(&1["method"] == "turn/start"))
+
+      assert length(turn_starts) == 1
     after
       System.delete_env("SYMP_TEST_CODEx_TRACE")
       File.rm_rf(test_root)

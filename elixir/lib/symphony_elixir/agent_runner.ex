@@ -205,7 +205,16 @@ defmodule SymphonyElixir.AgentRunner do
           {:ok, disposition}
 
         _ ->
-          continue_after_turn(app_session, issue, disposition, turn_context, turn_number)
+          if budget_wait_disposition?(disposition) do
+            Logger.info(
+              "Codex budget wait detected for #{issue_context(issue)} " <>
+                "summary=#{inspect(disposition.summary)}"
+            )
+
+            {:ok, disposition}
+          else
+            continue_after_turn(app_session, issue, disposition, turn_context, turn_number)
+          end
       end
     end
   end
@@ -296,6 +305,9 @@ defmodule SymphonyElixir.AgentRunner do
 
   defp worker_host_for_log(nil), do: "local"
   defp worker_host_for_log(worker_host), do: worker_host
+
+  defp budget_wait_disposition?(%RunDisposition{reason_code: "budget_wait"}), do: true
+  defp budget_wait_disposition?(_disposition), do: false
 
   defp normalize_issue_state(state_name) when is_binary(state_name) do
     state_name

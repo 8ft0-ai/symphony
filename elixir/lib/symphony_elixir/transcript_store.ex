@@ -493,6 +493,24 @@ defmodule SymphonyElixir.TranscriptStore do
   defp issue_identifier(_issue), do: @default_issue_identifier
 
   defp event_timestamp(%{timestamp: %DateTime{} = timestamp}), do: timestamp
+
+  defp event_timestamp(%{timestamp: %NaiveDateTime{} = timestamp}) do
+    DateTime.from_naive!(timestamp, "Etc/UTC")
+  end
+
+  defp event_timestamp(%{timestamp: timestamp}) when is_binary(timestamp) do
+    case DateTime.from_iso8601(timestamp) do
+      {:ok, parsed_timestamp, _offset} ->
+        parsed_timestamp
+
+      _ ->
+        case NaiveDateTime.from_iso8601(timestamp) do
+          {:ok, parsed_naive_timestamp} -> DateTime.from_naive!(parsed_naive_timestamp, "Etc/UTC")
+          _ -> DateTime.utc_now()
+        end
+    end
+  end
+
   defp event_timestamp(_message), do: DateTime.utc_now()
 
   defp session_id_for(message, workspace_context, timestamp) do
@@ -564,6 +582,25 @@ defmodule SymphonyElixir.TranscriptStore do
     datetime
     |> DateTime.truncate(:microsecond)
     |> DateTime.to_iso8601()
+  end
+
+  defp iso8601(%NaiveDateTime{} = naive_datetime) do
+    naive_datetime
+    |> DateTime.from_naive!("Etc/UTC")
+    |> iso8601()
+  end
+
+  defp iso8601(datetime) when is_binary(datetime) do
+    case DateTime.from_iso8601(datetime) do
+      {:ok, parsed_datetime, _offset} ->
+        iso8601(parsed_datetime)
+
+      _ ->
+        case NaiveDateTime.from_iso8601(datetime) do
+          {:ok, parsed_naive_datetime} -> iso8601(parsed_naive_datetime)
+          _ -> datetime
+        end
+    end
   end
 
   defp issue_identifier_from_manifest_path(path) do

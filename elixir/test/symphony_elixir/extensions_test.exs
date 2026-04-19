@@ -684,6 +684,7 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert html =~ "Live"
     assert html =~ "Offline"
     assert html =~ "Copy ID"
+    assert html =~ "/sessions/thread-http"
     assert html =~ "Codex update"
     assert html =~ "/issues/MT-HTTP"
     assert html =~ "/issues/MT-RETRY"
@@ -796,6 +797,170 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert switched_html =~ "older note"
     assert switched_html =~ "/api/v1/sessions/thread-http-older"
     assert switched_html =~ "/api/v1/sessions/thread-http-older.ndjson"
+    assert switched_html =~ "/sessions/thread-http-older"
+  end
+
+  test "session liveview renders a readable timeline for one session" do
+    orchestrator_name = Module.concat(__MODULE__, :SessionLiveOrchestrator)
+    snapshot = static_snapshot()
+    transcripts_root = Path.join(Path.dirname(Workflow.workflow_file_path()), "session-live-transcripts")
+
+    {:ok, _pid} =
+      StaticOrchestrator.start_link(
+        name: orchestrator_name,
+        snapshot: snapshot,
+        refresh: %{
+          queued: true,
+          coalesced: true,
+          requested_at: DateTime.utc_now(),
+          operations: ["poll"]
+        }
+      )
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      observability_transcripts_root: transcripts_root
+    )
+
+    append_test_transcript!(
+      %Issue{id: "issue-http", identifier: "MT-HTTP", title: "Session transcript", state: "In Progress"},
+      "thread-http",
+      base_time: ~U[2026-04-05 10:00:00Z],
+      delta: "human readable text",
+      turn_id: "turn-session-live"
+    )
+
+    start_test_endpoint(orchestrator: orchestrator_name, snapshot_timeout_ms: 50)
+
+    {:ok, _view, html} = live(build_conn(), "/sessions/thread-http")
+    assert html =~ "Session Conversation"
+    assert html =~ "human readable text"
+    assert html =~ "assistant response"
+    assert html =~ "(1 events)"
+    assert html =~ "/issues/MT-HTTP"
+    assert html =~ "/api/v1/sessions/thread-http"
+    assert html =~ "/api/v1/sessions/thread-http.ndjson"
+  end
+
+  test "session liveview collapses repetitive infrastructure updates" do
+    orchestrator_name = Module.concat(__MODULE__, :SessionInfraCondenseOrchestrator)
+    snapshot = static_snapshot()
+    transcripts_root = Path.join(Path.dirname(Workflow.workflow_file_path()), "session-infra-condense-transcripts")
+
+    {:ok, _pid} =
+      StaticOrchestrator.start_link(
+        name: orchestrator_name,
+        snapshot: snapshot,
+        refresh: %{
+          queued: true,
+          coalesced: true,
+          requested_at: DateTime.utc_now(),
+          operations: ["poll"]
+        }
+      )
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      observability_transcripts_root: transcripts_root
+    )
+
+    issue = %Issue{id: "issue-http", identifier: "MT-HTTP", title: "Infra collapse", state: "In Progress"}
+    session_id = "thread-http-infra"
+    base_time = ~U[2026-04-05 11:00:00Z]
+
+    context = %{
+      workspace_path: "/tmp/infra-condense",
+      session_id: session_id,
+      thread_id: session_id,
+      turn_id: "turn-infra-condense"
+    }
+
+    [
+      %{event: :session_started, session_id: session_id, thread_id: session_id, turn_id: "turn-infra-condense", timestamp: base_time},
+      %{event: :notification, payload: %{"method" => "mcpServer/startupStatus/updated"}, timestamp: DateTime.add(base_time, 1, :second)},
+      %{event: :notification, payload: %{"method" => "mcpServer/startupStatus/updated"}, timestamp: DateTime.add(base_time, 2, :second)},
+      %{event: :notification, payload: %{"method" => "mcpServer/startupStatus/updated"}, timestamp: DateTime.add(base_time, 3, :second)},
+      %{event: :turn_completed, payload: %{"method" => "turn/completed"}, timestamp: DateTime.add(base_time, 4, :second)}
+    ]
+    |> Enum.each(fn event ->
+      :ok = TranscriptStore.append(issue, context, event)
+    end)
+
+    start_test_endpoint(orchestrator: orchestrator_name, snapshot_timeout_ms: 50)
+
+    {:ok, _view, html} = live(build_conn(), "/sessions/#{session_id}")
+    assert html =~ "mcp startup status updated (3 updates)"
+    assert html =~ "Showing"
+    assert html =~ "timeline rows from"
+  end
+
+  test "session liveview supports toggling between condensed and raw views" do
+    orchestrator_name = Module.concat(__MODULE__, :SessionViewToggleOrchestrator)
+    snapshot = static_snapshot()
+    transcripts_root = Path.join(Path.dirname(Workflow.workflow_file_path()), "session-view-toggle-transcripts")
+
+    {:ok, _pid} =
+      StaticOrchestrator.start_link(
+        name: orchestrator_name,
+        snapshot: snapshot,
+        refresh: %{
+          queued: true,
+          coalesced: true,
+          requested_at: DateTime.utc_now(),
+          operations: ["poll"]
+        }
+      )
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      observability_transcripts_root: transcripts_root
+    )
+
+    issue = %Issue{id: "issue-http", identifier: "MT-HTTP", title: "View toggle", state: "In Progress"}
+    session_id = "thread-http-toggle"
+    base_time = ~U[2026-04-05 12:00:00Z]
+
+    context = %{
+      workspace_path: "/tmp/view-toggle",
+      session_id: session_id,
+      thread_id: session_id,
+      turn_id: "turn-view-toggle"
+    }
+
+    [
+      %{event: :session_started, session_id: session_id, thread_id: session_id, turn_id: "turn-view-toggle", timestamp: base_time},
+      %{
+        event: :notification,
+        payload: %{
+          "method" => "item/agentMessage/delta",
+          "params" => %{"delta" => "first chunk "}
+        },
+        timestamp: DateTime.add(base_time, 1, :second)
+      },
+      %{
+        event: :notification,
+        payload: %{
+          "method" => "item/agentMessage/delta",
+          "params" => %{"delta" => "second chunk"}
+        },
+        timestamp: DateTime.add(base_time, 2, :second)
+      },
+      %{event: :turn_completed, payload: %{"method" => "turn/completed"}, timestamp: DateTime.add(base_time, 3, :second)}
+    ]
+    |> Enum.each(fn event ->
+      :ok = TranscriptStore.append(issue, context, event)
+    end)
+
+    start_test_endpoint(orchestrator: orchestrator_name, snapshot_timeout_ms: 50)
+
+    {:ok, _view, condensed_html} = live(build_conn(), "/sessions/#{session_id}")
+    assert condensed_html =~ "assistant response:"
+    assert condensed_html =~ "(2 events)"
+    assert condensed_html =~ "view=raw"
+
+    {:ok, _view, raw_html} = live(build_conn(), "/sessions/#{session_id}?view=raw")
+    assert raw_html =~ "agent message streaming: first chunk"
+    assert raw_html =~ "agent message streaming: second chunk"
+    assert raw_html =~ "view=raw"
+    assert raw_html =~ "class=\"issue-link active-toggle\""
+    refute raw_html =~ "assistant response:"
   end
 
   test "dashboard liveview renders an unavailable state without crashing" do

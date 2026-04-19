@@ -129,6 +129,7 @@ defmodule SymphonyElixirWeb.IssueLive do
             <a :if={@payload.summary} class="issue-link" href={"/api/v1/#{@payload.header.issue_identifier}"}>Issue summary JSON</a>
             <a :if={@payload.selected_session} class="issue-link" href={@payload.selected_session["url"]}>Session JSON</a>
             <a :if={@payload.selected_session} class="issue-link" href={@payload.selected_session["ndjson_url"]}>Session NDJSON</a>
+            <a :if={@payload.selected_session} class="issue-link" href={@payload.selected_session["ui_url"]}>View session</a>
           </div>
         </section>
 

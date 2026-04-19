@@ -112,7 +112,7 @@ defmodule SymphonyElixir.Codex.AppServer do
 
             disposition =
               take_reported_run_outcome() ||
-                RunDisposition.completed(%{summary: RunDisposition.default_completed_summary()})
+                default_run_disposition(result)
 
             {:ok,
              %{
@@ -343,15 +343,33 @@ defmodule SymphonyElixir.Codex.AppServer do
       Config.settings!().codex.turn_timeout_ms,
       "",
       tool_executor,
-      auto_approve_requests
+      auto_approve_requests,
+      fresh_turn_state()
     )
   end
 
-  defp receive_loop(port, on_message, timeout_ms, pending_line, tool_executor, auto_approve_requests) do
+  defp receive_loop(
+         port,
+         on_message,
+         timeout_ms,
+         pending_line,
+         tool_executor,
+         auto_approve_requests,
+         turn_state
+       ) do
     receive do
       {^port, {:data, {:eol, chunk}}} ->
         complete_line = pending_line <> to_string(chunk)
-        handle_incoming(port, on_message, complete_line, timeout_ms, tool_executor, auto_approve_requests)
+
+        handle_incoming(
+          port,
+          on_message,
+          complete_line,
+          timeout_ms,
+          tool_executor,
+          auto_approve_requests,
+          turn_state
+        )
 
       {^port, {:data, {:noeol, chunk}}} ->
         receive_loop(
@@ -360,7 +378,8 @@ defmodule SymphonyElixir.Codex.AppServer do
           timeout_ms,
           pending_line <> to_string(chunk),
           tool_executor,
-          auto_approve_requests
+          auto_approve_requests,
+          turn_state
         )
 
       {^port, {:exit_status, status}} ->
@@ -371,13 +390,22 @@ defmodule SymphonyElixir.Codex.AppServer do
     end
   end
 
-  defp handle_incoming(port, on_message, data, timeout_ms, tool_executor, auto_approve_requests) do
+  defp handle_incoming(
+         port,
+         on_message,
+         data,
+         timeout_ms,
+         tool_executor,
+         auto_approve_requests,
+         turn_state
+       ) do
     payload_string = to_string(data)
 
     case Jason.decode(payload_string) do
       {:ok, %{"method" => "turn/completed"} = payload} ->
+        turn_state = update_turn_state(turn_state, payload)
         emit_turn_event(on_message, :turn_completed, payload, payload_string, port, payload)
-        {:ok, :turn_completed}
+        {:ok, completed_turn_result(turn_state)}
 
       {:ok, %{"method" => "turn/failed", "params" => _} = payload} ->
         emit_turn_event(
@@ -405,6 +433,8 @@ defmodule SymphonyElixir.Codex.AppServer do
 
       {:ok, %{"method" => method} = payload}
       when is_binary(method) ->
+        turn_state = update_turn_state(turn_state, payload)
+
         handle_turn_method(
           port,
           on_message,
@@ -413,10 +443,13 @@ defmodule SymphonyElixir.Codex.AppServer do
           method,
           timeout_ms,
           tool_executor,
-          auto_approve_requests
+          auto_approve_requests,
+          turn_state
         )
 
       {:ok, payload} ->
+        turn_state = update_turn_state(turn_state, payload)
+
         emit_message(
           on_message,
           :other_message,
@@ -427,7 +460,15 @@ defmodule SymphonyElixir.Codex.AppServer do
           metadata_from_message(port, payload)
         )
 
-        receive_loop(port, on_message, timeout_ms, "", tool_executor, auto_approve_requests)
+        receive_loop(
+          port,
+          on_message,
+          timeout_ms,
+          "",
+          tool_executor,
+          auto_approve_requests,
+          turn_state
+        )
 
       {:error, _reason} ->
         log_non_json_stream_line(payload_string, "turn stream")
@@ -444,7 +485,15 @@ defmodule SymphonyElixir.Codex.AppServer do
           )
         end
 
-        receive_loop(port, on_message, timeout_ms, "", tool_executor, auto_approve_requests)
+        receive_loop(
+          port,
+          on_message,
+          timeout_ms,
+          "",
+          tool_executor,
+          auto_approve_requests,
+          turn_state
+        )
     end
   end
 
@@ -469,7 +518,8 @@ defmodule SymphonyElixir.Codex.AppServer do
          method,
          timeout_ms,
          tool_executor,
-         auto_approve_requests
+         auto_approve_requests,
+         turn_state
        ) do
     metadata = metadata_from_message(port, payload)
 
@@ -504,7 +554,15 @@ defmodule SymphonyElixir.Codex.AppServer do
         {:error, {:turn_input_required, payload}}
 
       :approved ->
-        receive_loop(port, on_message, timeout_ms, "", tool_executor, auto_approve_requests)
+        receive_loop(
+          port,
+          on_message,
+          timeout_ms,
+          "",
+          tool_executor,
+          auto_approve_requests,
+          turn_state
+        )
 
       :approval_required ->
         emit_message(
@@ -538,9 +596,40 @@ defmodule SymphonyElixir.Codex.AppServer do
           )
 
           Logger.debug("Codex notification: #{inspect(method)}")
-          receive_loop(port, on_message, timeout_ms, "", tool_executor, auto_approve_requests)
+
+          receive_loop(
+            port,
+            on_message,
+            timeout_ms,
+            "",
+            tool_executor,
+            auto_approve_requests,
+            turn_state
+          )
         end
     end
+  end
+
+  defp maybe_handle_approval_request(
+         port,
+         "mcpServer/elicitation/request",
+         %{"id" => id} = payload,
+         payload_string,
+         on_message,
+         metadata,
+         _tool_executor,
+         true
+       ) do
+    send_message(port, %{"id" => id, "result" => %{"approved" => true}})
+
+    emit_message(
+      on_message,
+      :approval_auto_approved,
+      %{payload: payload, raw: payload_string, decision: "approved"},
+      metadata
+    )
+
+    :approved
   end
 
   defp maybe_handle_approval_request(
@@ -551,7 +640,7 @@ defmodule SymphonyElixir.Codex.AppServer do
          _on_message,
          _metadata,
          _tool_executor,
-         _auto_approve_requests
+         false
        ) do
     :mcp_elicitation_required
   end
@@ -1047,11 +1136,14 @@ defmodule SymphonyElixir.Codex.AppServer do
   end
 
   defp metadata_from_message(port, payload) do
-    port |> port_metadata(nil) |> maybe_set_usage(payload)
+    port
+    |> port_metadata(nil)
+    |> maybe_set_usage(payload)
+    |> maybe_set_rate_limits(payload)
   end
 
   defp maybe_set_usage(metadata, payload) when is_map(payload) do
-    usage = Map.get(payload, "usage") || Map.get(payload, :usage)
+    usage = extract_usage_from_payload(payload)
 
     if is_map(usage) do
       Map.put(metadata, :usage, usage)
@@ -1061,6 +1153,297 @@ defmodule SymphonyElixir.Codex.AppServer do
   end
 
   defp maybe_set_usage(metadata, _payload), do: metadata
+
+  defp maybe_set_rate_limits(metadata, payload) when is_map(payload) do
+    rate_limits = extract_rate_limits_from_payload(payload)
+
+    if is_map(rate_limits) do
+      Map.put(metadata, :rate_limits, rate_limits)
+    else
+      metadata
+    end
+  end
+
+  defp maybe_set_rate_limits(metadata, _payload), do: metadata
+
+  defp fresh_turn_state do
+    %{
+      progress?: false,
+      budget_signal?: false,
+      rate_limits: nil
+    }
+  end
+
+  defp update_turn_state(turn_state, payload) when is_map(turn_state) and is_map(payload) do
+    rate_limits = extract_rate_limits_from_payload(payload) || turn_state.rate_limits
+    usage = extract_usage_from_payload(payload)
+
+    %{
+      progress?: turn_state.progress? || substantive_turn_payload?(payload, usage),
+      budget_signal?: turn_state.budget_signal? || budget_wait_signal?(payload, usage, rate_limits),
+      rate_limits: rate_limits
+    }
+  end
+
+  defp update_turn_state(turn_state, _payload), do: turn_state
+
+  defp completed_turn_result(%{progress?: false, budget_signal?: true, rate_limits: rate_limits}) do
+    %{status: :budget_wait, rate_limits: rate_limits}
+  end
+
+  defp completed_turn_result(%{rate_limits: rate_limits}) do
+    %{status: :completed, rate_limits: rate_limits}
+  end
+
+  defp default_run_disposition(%{status: :budget_wait, rate_limits: rate_limits}) do
+    RunDisposition.failed("budget_wait", %{
+      summary: "Codex token budget was exhausted before the turn made progress.",
+      retryable: true,
+      details: %{"rate_limits" => rate_limits || %{}}
+    })
+  end
+
+  defp default_run_disposition(_result) do
+    RunDisposition.completed(%{summary: RunDisposition.default_completed_summary()})
+  end
+
+  defp substantive_turn_payload?(payload, usage) when is_map(payload) do
+    cond do
+      is_map(usage) ->
+        true
+
+      progress_method?(Map.get(payload, "method") || Map.get(payload, :method)) ->
+        true
+
+      progress_event_type?(payload_event_type(payload)) ->
+        true
+
+      true ->
+        false
+    end
+  end
+
+  defp substantive_turn_payload?(_payload, _usage), do: false
+
+  defp budget_wait_signal?(payload, usage, rate_limits) when is_map(payload) do
+    token_count_payload?(payload) and !is_map(usage) and exhausted_rate_limits?(rate_limits)
+  end
+
+  defp budget_wait_signal?(_payload, _usage, _rate_limits), do: false
+
+  defp progress_method?(method) when is_binary(method) do
+    String.starts_with?(method, "item/") or
+      method in [
+        "turn/input_required",
+        "turn/needs_input",
+        "turn/need_input",
+        "turn/request_input",
+        "turn/request_response",
+        "turn/provide_input",
+        "turn/approval_required"
+      ] or
+      progress_wrapper_method?(method)
+  end
+
+  defp progress_method?(_method), do: false
+
+  defp progress_wrapper_method?(<<"codex/event/", suffix::binary>>) do
+    suffix in [
+      "agent_message",
+      "agent_message_delta",
+      "agent_message_content_delta",
+      "agent_reasoning",
+      "agent_reasoning_delta",
+      "reasoning_content_delta",
+      "exec_command_begin",
+      "exec_command_end",
+      "exec_command_output_delta",
+      "mcp_tool_call_begin",
+      "mcp_tool_call_end",
+      "turn_diff"
+    ]
+  end
+
+  defp progress_wrapper_method?(_method), do: false
+
+  defp progress_event_type?(type) when is_binary(type) do
+    type in [
+      "agent_message",
+      "agent_message_delta",
+      "agent_message_content_delta",
+      "agent_reasoning",
+      "agent_reasoning_delta",
+      "reasoning_content_delta",
+      "exec_command_begin",
+      "exec_command_end",
+      "exec_command_output_delta",
+      "mcp_tool_call_begin",
+      "mcp_tool_call_end",
+      "turn_diff"
+    ]
+  end
+
+  defp progress_event_type?(_type), do: false
+
+  defp token_count_payload?(payload) when is_map(payload) do
+    method = Map.get(payload, "method") || Map.get(payload, :method)
+
+    method == "codex/event/token_count" or
+      payload_event_type(payload) == "token_count"
+  end
+
+  defp token_count_payload?(_payload), do: false
+
+  defp payload_event_type(payload) when is_map(payload) do
+    case Map.get(payload, "type") || Map.get(payload, :type) do
+      "event_msg" ->
+        nested = nested_payload(payload) || %{}
+        Map.get(nested, "type") || Map.get(nested, :type)
+
+      nil ->
+        case event_msg_wrapper(payload) do
+          %{} = wrapped_payload -> payload_event_type(wrapped_payload)
+          _ -> nil
+        end
+
+      other ->
+        other
+    end
+  end
+
+  defp payload_event_type(_payload), do: nil
+
+  defp extract_usage_from_payload(payload) when is_map(payload) do
+    direct_usage =
+      Map.get(payload, "usage") ||
+        Map.get(payload, :usage)
+
+    event_msg_usage =
+      payload_candidates(payload)
+      |> Enum.find_value(fn candidate ->
+        Map.get(candidate, "total_token_usage") ||
+          Map.get(candidate, :total_token_usage) ||
+          Map.get(candidate, "totalTokenUsage") ||
+          Map.get(candidate, :totalTokenUsage) ||
+          map_path(candidate, ["info", "total_token_usage"]) ||
+          map_path(candidate, [:info, :total_token_usage]) ||
+          map_path(candidate, ["info", "totalTokenUsage"]) ||
+          map_path(candidate, [:info, :totalTokenUsage])
+      end)
+
+    direct_usage || event_msg_usage
+  end
+
+  defp extract_usage_from_payload(_payload), do: nil
+
+  defp extract_rate_limits_from_payload(payload) when is_map(payload) do
+    payload_candidates(payload)
+    |> Enum.find_value(fn candidate ->
+      Map.get(candidate, "rate_limits") ||
+        Map.get(candidate, :rate_limits) ||
+        Map.get(candidate, "rateLimits") ||
+        Map.get(candidate, :rateLimits)
+    end)
+  end
+
+  defp extract_rate_limits_from_payload(_payload), do: nil
+
+  defp nested_payload(payload) when is_map(payload) do
+    Map.get(payload, "payload") || Map.get(payload, :payload)
+  end
+
+  defp nested_payload(_payload), do: nil
+
+  defp event_msg_wrapper(payload) when is_map(payload) do
+    map_path(payload, ["params", "msg"]) || map_path(payload, [:params, :msg])
+  end
+
+  defp event_msg_wrapper(_payload), do: nil
+
+  defp payload_candidates(payload) when is_map(payload) do
+    [
+      payload,
+      nested_payload(payload),
+      event_msg_wrapper(payload),
+      map_path(payload, ["params", "msg", "payload"]),
+      map_path(payload, [:params, :msg, :payload])
+    ]
+    |> Enum.filter(&is_map/1)
+  end
+
+  defp payload_candidates(_payload), do: []
+
+  defp exhausted_rate_limits?(rate_limits) when is_map(rate_limits) do
+    [Map.get(rate_limits, "primary") || Map.get(rate_limits, :primary), Map.get(rate_limits, "secondary") || Map.get(rate_limits, :secondary)]
+    |> Enum.any?(&rate_limit_bucket_exhausted?/1)
+  end
+
+  defp exhausted_rate_limits?(_rate_limits), do: false
+
+  defp rate_limit_bucket_exhausted?(bucket) when is_map(bucket) do
+    used_percent = map_number(bucket, ["used_percent", :used_percent, "usedPercent", :usedPercent])
+    remaining = map_integer(bucket, ["remaining", :remaining])
+
+    (is_float(used_percent) and used_percent >= 100.0) or
+      (is_integer(remaining) and remaining <= 0)
+  end
+
+  defp rate_limit_bucket_exhausted?(_bucket), do: false
+
+  defp map_path(payload, path) when is_map(payload) and is_list(path) do
+    Enum.reduce_while(path, payload, fn key, acc ->
+      if is_map(acc) and Map.has_key?(acc, key) do
+        {:cont, Map.get(acc, key)}
+      else
+        {:halt, nil}
+      end
+    end)
+  end
+
+  defp map_path(_payload, _path), do: nil
+
+  defp map_integer(map, keys) when is_map(map) and is_list(keys) do
+    Enum.find_value(keys, fn key ->
+      case Map.get(map, key) do
+        value when is_integer(value) ->
+          value
+
+        value when is_binary(value) ->
+          case Integer.parse(String.trim(value)) do
+            {integer, _rest} -> integer
+            _ -> nil
+          end
+
+        _ ->
+          nil
+      end
+    end)
+  end
+
+  defp map_integer(_map, _keys), do: nil
+
+  defp map_number(map, keys) when is_map(map) and is_list(keys) do
+    Enum.find_value(keys, fn key ->
+      case Map.get(map, key) do
+        value when is_integer(value) ->
+          value * 1.0
+
+        value when is_float(value) ->
+          value
+
+        value when is_binary(value) ->
+          case Float.parse(String.trim(value)) do
+            {number, _rest} -> number
+            _ -> nil
+          end
+
+        _ ->
+          nil
+      end
+    end)
+  end
+
+  defp map_number(_map, _keys), do: nil
 
   defp shell_escape(value) when is_binary(value) do
     "'" <> String.replace(value, "'", "'\"'\"'") <> "'"
