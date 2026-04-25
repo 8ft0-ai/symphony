@@ -205,17 +205,21 @@ defmodule SymphonyElixir.AgentRunner do
           {:ok, disposition}
 
         _ ->
-          if budget_wait_disposition?(disposition) do
-            Logger.info(
-              "Codex budget wait detected for #{issue_context(issue)} " <>
-                "summary=#{inspect(disposition.summary)}"
-            )
-
-            {:ok, disposition}
-          else
-            continue_after_turn(app_session, issue, disposition, turn_context, turn_number)
-          end
+          handle_completed_disposition(app_session, issue, disposition, turn_context, turn_number)
       end
+    end
+  end
+
+  defp handle_completed_disposition(app_session, issue, disposition, turn_context, turn_number) do
+    if budget_wait_disposition?(disposition) do
+      Logger.info(
+        "Codex budget wait detected for #{issue_context(issue)} " <>
+          "summary=#{inspect(disposition.summary)}"
+      )
+
+      {:ok, disposition}
+    else
+      continue_after_turn(app_session, issue, disposition, turn_context, turn_number)
     end
   end
 

@@ -10,10 +10,30 @@ defmodule SymphonyElixirWeb.SessionLive do
   @default_limit 100
   @default_order "asc"
   @default_view "condensed"
+  @streaming_summary_prefixes [
+    "agent message streaming",
+    "agent message content streaming",
+    "reasoning streaming",
+    "reasoning content streaming",
+    "reasoning text streaming",
+    "reasoning summary streaming",
+    "plan streaming",
+    "command output streaming",
+    "file change output streaming"
+  ]
+
+  @stream_kind_matchers [
+    {"assistant", "agentmessage", "agent message"},
+    {"reasoning", "reasoning", "reasoning"},
+    {"plan", "plan", "plan streaming"},
+    {"command", "commandexecution", "command output"},
+    {"file", "filechange", "file change output"}
+  ]
+
   @collapsible_infra_methods MapSet.new([
-                              "mcpServer/startupStatus/updated",
-                              "thread/status/changed"
-                            ])
+                               "mcpServer/startupStatus/updated",
+                               "thread/status/changed"
+                             ])
 
   @impl true
   def mount(%{"session_id" => session_id}, _session, socket) do
@@ -334,16 +354,7 @@ defmodule SymphonyElixirWeb.SessionLive do
     method = event_method(event) |> String.downcase()
     summary = event_summary(event) |> String.downcase()
 
-    String.contains?(method, "delta") or
-      String.starts_with?(summary, "agent message streaming") or
-      String.starts_with?(summary, "agent message content streaming") or
-      String.starts_with?(summary, "reasoning streaming") or
-      String.starts_with?(summary, "reasoning content streaming") or
-      String.starts_with?(summary, "reasoning text streaming") or
-      String.starts_with?(summary, "reasoning summary streaming") or
-      String.starts_with?(summary, "plan streaming") or
-      String.starts_with?(summary, "command output streaming") or
-      String.starts_with?(summary, "file change output streaming")
+    String.contains?(method, "delta") or starts_with_any?(summary, @streaming_summary_prefixes)
   end
 
   defp collapsible_infra_event?(event) do
@@ -482,14 +493,9 @@ defmodule SymphonyElixirWeb.SessionLive do
     method = event_method(event) |> String.downcase()
     summary = event_summary(event) |> String.downcase()
 
-    cond do
-      String.contains?(method, "agentmessage") or String.starts_with?(summary, "agent message") -> "assistant"
-      String.contains?(method, "reasoning") or String.starts_with?(summary, "reasoning") -> "reasoning"
-      String.contains?(method, "plan") or String.starts_with?(summary, "plan streaming") -> "plan"
-      String.contains?(method, "commandexecution") or String.starts_with?(summary, "command output") -> "command"
-      String.contains?(method, "filechange") or String.starts_with?(summary, "file change output") -> "file"
-      true -> "stream"
-    end
+    Enum.find_value(@stream_kind_matchers, "stream", fn {kind, method_fragment, summary_prefix} ->
+      if String.contains?(method, method_fragment) or String.starts_with?(summary, summary_prefix), do: kind
+    end)
   end
 
   defp stream_kind_label("assistant"), do: "assistant response"
@@ -509,6 +515,12 @@ defmodule SymphonyElixirWeb.SessionLive do
       _ -> []
     end
   end
+
+  defp starts_with_any?(value, prefixes) when is_binary(value) and is_list(prefixes) do
+    Enum.any?(prefixes, &String.starts_with?(value, &1))
+  end
+
+  defp starts_with_any?(_value, _prefixes), do: false
 
   defp event_method(event), do: to_string(event["method"] || event["event"] || "event")
   defp event_summary(event), do: to_string(event["summary"] || "")

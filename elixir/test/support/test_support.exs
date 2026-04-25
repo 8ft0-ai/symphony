@@ -37,7 +37,8 @@ defmodule SymphonyElixir.TestSupport do
         workflow_file = Path.join(workflow_root, "WORKFLOW.md")
         write_workflow_file!(workflow_file)
         Workflow.set_workflow_file_path(workflow_file)
-        if Process.whereis(SymphonyElixir.WorkflowStore), do: SymphonyElixir.WorkflowStore.force_reload()
+        SymphonyElixir.TestSupport.ensure_workflow_store_running()
+        SymphonyElixir.WorkflowStore.force_reload()
         stop_default_http_server()
 
         on_exit(fn ->
@@ -87,6 +88,17 @@ defmodule SymphonyElixir.TestSupport do
 
       _ ->
         :ok
+    end
+  end
+
+  def ensure_workflow_store_running do
+    if Process.whereis(SymphonyElixir.WorkflowStore) do
+      :ok
+    else
+      case Supervisor.restart_child(SymphonyElixir.Supervisor, SymphonyElixir.WorkflowStore) do
+        {:ok, _pid} -> :ok
+        {:error, {:already_started, _pid}} -> :ok
+      end
     end
   end
 
