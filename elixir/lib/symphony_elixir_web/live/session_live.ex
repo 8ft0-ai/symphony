@@ -167,6 +167,23 @@ defmodule SymphonyElixirWeb.SessionLive do
             <p class="timeline-summary"><%= @payload.now.last_update || "No meaningful updates yet." %></p>
           </div>
 
+          <div class="timeline-event" style="margin-top: 0.9rem;">
+            <div class="timeline-meta">
+              <span class="state-badge">changes</span>
+              <span class="mono">What changed since last check</span>
+            </div>
+            <%= if @payload.recent_changes == [] do %>
+              <p class="timeline-summary">No significant changes yet.</p>
+            <% else %>
+              <div class="change-list">
+                <article :for={change <- @payload.recent_changes} class="change-item">
+                  <p class="change-time mono"><%= change.at || "n/a" %></p>
+                  <p class="change-summary"><%= change.summary %></p>
+                </article>
+              </div>
+            <% end %>
+          </div>
+
           <%= if @payload.warnings != [] do %>
             <div class="session-warnings">
               <article :for={warning <- @payload.warnings} class="warning-card">
@@ -317,6 +334,7 @@ defmodule SymphonyElixirWeb.SessionLive do
           raw_event_count: 0,
           displayed_event_count: 0,
           condensed_event_count: 0,
+          recent_changes: [],
           now: empty_now_snapshot(),
           warnings: [],
           view_mode: normalize_view_mode(query["view"]),
@@ -337,6 +355,7 @@ defmodule SymphonyElixirWeb.SessionLive do
         projected_events = enrich_action_events(projected_events, raw_events)
         raw_event_count = length(payload.events)
         displayed_event_count = length(projected_events)
+        recent_changes = build_recent_changes(condensed_events, raw_events)
         now_snapshot = build_now_snapshot(payload.session, raw_events, condensed_events)
         warnings = infer_session_warnings(payload.session, raw_events, now_snapshot)
 
@@ -348,6 +367,7 @@ defmodule SymphonyElixirWeb.SessionLive do
           raw_event_count: raw_event_count,
           displayed_event_count: displayed_event_count,
           condensed_event_count: max(raw_event_count - displayed_event_count, 0),
+          recent_changes: recent_changes,
           now: now_snapshot,
           warnings: warnings,
           view_mode: view_mode,
@@ -366,6 +386,7 @@ defmodule SymphonyElixirWeb.SessionLive do
           raw_event_count: 0,
           displayed_event_count: 0,
           condensed_event_count: 0,
+          recent_changes: [],
           now: empty_now_snapshot(),
           warnings: [],
           view_mode: normalize_view_mode(query["view"]),
@@ -604,6 +625,35 @@ defmodule SymphonyElixirWeb.SessionLive do
   end
 
   defp latest_meaningful_event(_events), do: nil
+
+  defp build_recent_changes(condensed_events, raw_events) do
+    condensed_events
+    |> apply_tab_scope("checkin")
+    |> apply_checkin_projection("checkin")
+    |> enrich_action_events(raw_events)
+    |> Enum.filter(&meaningful_change_event?/1)
+    |> Enum.take(3)
+    |> Enum.map(fn event ->
+      %{
+        at: event["ts"],
+        summary: truncate_text(to_string(event["summary"] || "n/a"), 180)
+      }
+    end)
+  end
+
+  defp meaningful_change_event?(event) do
+    method = event_method(event)
+    summary = String.downcase(event_summary(event))
+
+    cond do
+      String.starts_with?(summary, "assistant update:") -> true
+      String.starts_with?(summary, "assistant response:") -> true
+      method == "item/completed" and is_binary(event["action_status"]) -> true
+      method == "turn/completed" -> true
+      String.starts_with?(summary, "command output:") -> true
+      true -> false
+    end
+  end
 
   defp infer_phase(session, raw_events) do
     status = to_string(session["status"] || "")

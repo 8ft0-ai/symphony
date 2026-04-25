@@ -27,7 +27,7 @@
 
 - [x] Add “stalled” and “looping” heuristics with explicit warning banners.
 - [x] Add per-action duration and result status chips.
-- [ ] Add a compact “What changed since last check” summary.
+- [x] Add a compact “What changed since last check” summary.
 
 ## Phase 3: Debuggability and Speed
 

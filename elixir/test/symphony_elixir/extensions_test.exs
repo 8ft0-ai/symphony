@@ -837,6 +837,7 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert html =~ "Now"
     assert html =~ "Current phase"
     assert html =~ "Health"
+    assert html =~ "What changed since last check"
     assert html =~ "human readable text"
     assert html =~ "(1 events)"
     assert html =~ "Check-in preset"
