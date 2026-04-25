@@ -34,5 +34,14 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-mix-
 
+      - name: Check for merge conflicts
+        run: |
+          # Check if current PR has conflicts with base branch
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            git fetch origin ${{ github.base_ref }}
+            git merge-base HEAD origin/${{ github.base_ref }} >/dev/null || exit 1
+            echo "No merge conflicts detected"
+          fi
+
       - name: Verify make all
         run: make all

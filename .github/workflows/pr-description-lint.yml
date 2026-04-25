@@ -31,3 +31,10 @@ jobs:
           mix deps.get
           printf '%s' "$PR_BODY_JSON" | jq -r '.' > /tmp/pr_body.md
           mix pr_body.check --file /tmp/pr_body.md
+
+      - name: Check for merge conflicts
+        run: |
+          # Check if current PR has conflicts with base branch
+          git fetch origin ${{ github.base_ref }}
+          git merge-base HEAD origin/${{ github.base_ref }} >/dev/null || exit 1
+          echo "No merge conflicts detected"
