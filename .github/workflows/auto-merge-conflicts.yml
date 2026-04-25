@@ -44,3 +44,19 @@ jobs:
           echo "No conflicts detected, checking merge requirements..."
           # This would be extended with actual merge logic
           echo "Would auto-merge PR here"
+          
+      - name: Resolve conflicts automatically
+        if: steps.check.outcome != 'success'
+        run: |
+          echo "Attempting to resolve conflicts automatically..."
+          # Try to resolve simple conflicts automatically
+          git checkout ${{ github.event.pull_request.base.sha }}
+          git merge --no-commit ${{ github.event.pull_request.head.sha }} 2>/dev/null || true
+          # Check for conflict markers
+          if git diff --check; then
+            echo "Simple conflicts resolved, committing merge"
+            git commit -m "Auto-resolved merge conflicts"
+          else
+            echo "Complex conflicts require manual resolution"
+            exit 1
+          fi
