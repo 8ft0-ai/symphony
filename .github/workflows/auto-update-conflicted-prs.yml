@@ -1,0 +1,68 @@
+name: auto-update-conflicted-prs
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  update-branch:
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout PR branch
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.ref }}
+
+      - name: Merge base branch into PR branch
+        id: merge
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git fetch origin "$BASE_REF"
+          before_sha="$(git rev-parse HEAD)"
+
+          if git merge --no-edit "origin/$BASE_REF"; then
+            after_sha="$(git rev-parse HEAD)"
+
+            if [ "$before_sha" != "$after_sha" ]; then
+              echo "merged=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "merged=false" >> "$GITHUB_OUTPUT"
+            fi
+          else
+            git merge --abort || true
+            echo "conflicted=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+      - name: Push updated PR branch
+        if: steps.merge.outputs.merged == 'true'
+        run: git push origin "HEAD:${{ github.event.pull_request.head.ref }}"
+
+      - name: Comment when branch was updated
+        if: steps.merge.outputs.merged == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh pr comment "${{ github.event.pull_request.number }}" \
+            --repo "${{ github.repository }}" \
+            --body "Merged the base branch into this PR branch automatically to clear conflicts."
+
+      - name: Comment when manual resolution is required
+        if: steps.merge.outputs.conflicted == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh pr comment "${{ github.event.pull_request.number }}" \
+            --repo "${{ github.repository }}" \
+            --body "Tried to merge the base branch into this PR branch automatically, but the conflicts require manual resolution."
