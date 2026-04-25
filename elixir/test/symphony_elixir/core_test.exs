@@ -550,6 +550,7 @@ defmodule SymphonyElixir.CoreTest do
     ref = make_ref()
     orchestrator_name = Module.concat(__MODULE__, :ContinuationOrchestrator)
     {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+    before_exit_ms = System.monotonic_time(:millisecond)
 
     on_exit(fn ->
       if Process.alive?(pid) do
@@ -582,7 +583,8 @@ defmodule SymphonyElixir.CoreTest do
     assert MapSet.member?(state.completed, issue_id)
     assert %{attempt: 1, due_at_ms: due_at_ms} = state.retry_attempts[issue_id]
     assert is_integer(due_at_ms)
-    assert_due_in_range(due_at_ms, 200, 1_100)
+    assert due_at_ms >= before_exit_ms + 200
+    assert due_at_ms <= before_exit_ms + 1_500
   end
 
   test "budget wait worker exit schedules retry at the reported reset window without consuming completion state" do

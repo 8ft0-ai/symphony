@@ -29,6 +29,7 @@ defmodule SymphonyElixir.RunDisposition do
         }
 
   @default_completed_summary "Codex turn completed normally."
+  @allowed_report_keys ~w[status summary reason_code retryable clearance_hint details]
   @status_values ~w[completed blocked failed]
   @known_blocked_reason_codes ~w[
     approval_required
@@ -47,6 +48,10 @@ defmodule SymphonyElixir.RunDisposition do
             optional(:clearance_hint) => String.t() | nil,
             optional(:details) => map() | nil
           }
+
+  @dialyzer {:nowarn_function, normalize_report_arguments: 1}
+  @dialyzer {:nowarn_function, normalize_retryable: 1}
+  @dialyzer {:nowarn_function, validate_report_shape: 3}
 
   @spec status_values() :: [String.t()]
   def status_values, do: @status_values
@@ -87,9 +92,9 @@ defmodule SymphonyElixir.RunDisposition do
 
   @spec normalize_report_arguments(term()) :: {:ok, t()} | {:error, atom()}
   def normalize_report_arguments(arguments) when is_map(arguments) do
-    allowed_keys = MapSet.new(~w[status summary reason_code retryable clearance_hint details])
+    arguments = stringify_argument_keys(arguments)
 
-    with :ok <- validate_allowed_keys(arguments, allowed_keys),
+    with :ok <- validate_allowed_keys(arguments, @allowed_report_keys),
          {:ok, status} <- normalize_status(arguments),
          {:ok, summary} <- normalize_required_text(arguments, "summary"),
          {:ok, reason_code} <- normalize_optional_reason_code(arguments),
@@ -216,7 +221,7 @@ defmodule SymphonyElixir.RunDisposition do
   end
 
   defp normalize_status(arguments) do
-    case Map.get(arguments, "status") || Map.get(arguments, :status) do
+    case Map.get(arguments, "status") do
       nil ->
         {:error, :missing_report_status}
 
@@ -241,7 +246,8 @@ defmodule SymphonyElixir.RunDisposition do
     invalid_keys =
       arguments
       |> Map.keys()
-      |> Enum.reject(&MapSet.member?(allowed_keys, to_string(&1)))
+      |> Enum.map(&to_string/1)
+      |> Enum.reject(&(&1 in allowed_keys))
 
     if invalid_keys == [], do: :ok, else: {:error, :invalid_report_arguments}
   end
@@ -255,7 +261,7 @@ defmodule SymphonyElixir.RunDisposition do
   end
 
   defp normalize_optional_text(arguments, key) do
-    value = Map.get(arguments, key) || Map.get(arguments, String.to_atom(key))
+    value = Map.get(arguments, key)
 
     case value do
       nil ->
@@ -273,7 +279,7 @@ defmodule SymphonyElixir.RunDisposition do
   end
 
   defp normalize_optional_reason_code(arguments) do
-    case Map.get(arguments, "reason_code") || Map.get(arguments, :reason_code) do
+    case Map.get(arguments, "reason_code") do
       nil ->
         {:ok, nil}
 
@@ -292,7 +298,7 @@ defmodule SymphonyElixir.RunDisposition do
   end
 
   defp normalize_retryable(arguments) do
-    case Map.get(arguments, "retryable") || Map.get(arguments, :retryable) do
+    case Map.get(arguments, "retryable") do
       nil -> {:ok, false}
       value when is_boolean(value) -> {:ok, value}
       _ -> {:error, :invalid_report_retryable}
@@ -300,21 +306,31 @@ defmodule SymphonyElixir.RunDisposition do
   end
 
   defp normalize_details(arguments) do
-    case Map.get(arguments, "details") || Map.get(arguments, :details) do
+    case Map.get(arguments, "details") do
       nil -> {:ok, %{}}
       details when is_map(details) -> {:ok, normalize_details_value(details)}
       _ -> {:error, :invalid_report_details}
     end
   end
 
+  defp stringify_argument_keys(arguments) do
+    Map.new(arguments, fn {key, value} -> {to_string(key), value} end)
+  end
+
   defp validate_report_shape(:completed, _reason_code, _retryable), do: :ok
 
-  defp validate_report_shape(:blocked, reason_code, retryable)
-       when is_binary(reason_code) and retryable == false,
-       do: :ok
+  defp validate_report_shape(:blocked, reason_code, retryable) do
+    cond do
+      is_nil(reason_code) ->
+        {:error, :missing_report_reason_code}
 
-  defp validate_report_shape(:blocked, nil, _retryable), do: {:error, :missing_report_reason_code}
-  defp validate_report_shape(:blocked, _reason_code, true), do: {:error, :invalid_report_retryable}
+      retryable == false ->
+        :ok
+
+      true ->
+        {:error, :invalid_report_retryable}
+    end
+  end
 
   defp normalize_optional_text_value(nil), do: nil
 

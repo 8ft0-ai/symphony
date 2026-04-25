@@ -438,12 +438,9 @@ defmodule SymphonyElixir.Codex.AppServer do
         handle_turn_method(
           port,
           on_message,
-          payload,
-          payload_string,
           method,
-          timeout_ms,
-          tool_executor,
-          auto_approve_requests,
+          %{payload: payload, raw: payload_string},
+          %{timeout_ms: timeout_ms, tool_executor: tool_executor, auto_approve_requests: auto_approve_requests},
           turn_state
         )
 
@@ -510,18 +507,11 @@ defmodule SymphonyElixir.Codex.AppServer do
     )
   end
 
-  defp handle_turn_method(
-         port,
-         on_message,
-         payload,
-         payload_string,
-         method,
-         timeout_ms,
-         tool_executor,
-         auto_approve_requests,
-         turn_state
-       ) do
+  defp handle_turn_method(port, on_message, method, %{payload: payload, raw: payload_string}, turn_opts, turn_state) do
     metadata = metadata_from_message(port, payload)
+    timeout_ms = turn_opts.timeout_ms
+    tool_executor = turn_opts.tool_executor
+    auto_approve_requests = turn_opts.auto_approve_requests
 
     case maybe_handle_approval_request(
            port,
@@ -1223,13 +1213,9 @@ defmodule SymphonyElixir.Codex.AppServer do
     end
   end
 
-  defp substantive_turn_payload?(_payload, _usage), do: false
-
   defp budget_wait_signal?(payload, usage, rate_limits) when is_map(payload) do
     token_count_payload?(payload) and !is_map(usage) and exhausted_rate_limits?(rate_limits)
   end
-
-  defp budget_wait_signal?(_payload, _usage, _rate_limits), do: false
 
   defp progress_method?(method) when is_binary(method) do
     String.starts_with?(method, "item/") or
@@ -1292,8 +1278,6 @@ defmodule SymphonyElixir.Codex.AppServer do
       payload_event_type(payload) == "token_count"
   end
 
-  defp token_count_payload?(_payload), do: false
-
   defp payload_event_type(payload) when is_map(payload) do
     case Map.get(payload, "type") || Map.get(payload, :type) do
       "event_msg" ->
@@ -1311,30 +1295,15 @@ defmodule SymphonyElixir.Codex.AppServer do
     end
   end
 
-  defp payload_event_type(_payload), do: nil
-
   defp extract_usage_from_payload(payload) when is_map(payload) do
     direct_usage =
       Map.get(payload, "usage") ||
         Map.get(payload, :usage)
 
-    event_msg_usage =
-      payload_candidates(payload)
-      |> Enum.find_value(fn candidate ->
-        Map.get(candidate, "total_token_usage") ||
-          Map.get(candidate, :total_token_usage) ||
-          Map.get(candidate, "totalTokenUsage") ||
-          Map.get(candidate, :totalTokenUsage) ||
-          map_path(candidate, ["info", "total_token_usage"]) ||
-          map_path(candidate, [:info, :total_token_usage]) ||
-          map_path(candidate, ["info", "totalTokenUsage"]) ||
-          map_path(candidate, [:info, :totalTokenUsage])
-      end)
+    event_msg_usage = Enum.find_value(payload_candidates(payload), &usage_value/1)
 
     direct_usage || event_msg_usage
   end
-
-  defp extract_usage_from_payload(_payload), do: nil
 
   defp extract_rate_limits_from_payload(payload) when is_map(payload) do
     payload_candidates(payload)
@@ -1346,19 +1315,13 @@ defmodule SymphonyElixir.Codex.AppServer do
     end)
   end
 
-  defp extract_rate_limits_from_payload(_payload), do: nil
-
   defp nested_payload(payload) when is_map(payload) do
     Map.get(payload, "payload") || Map.get(payload, :payload)
   end
 
-  defp nested_payload(_payload), do: nil
-
   defp event_msg_wrapper(payload) when is_map(payload) do
     map_path(payload, ["params", "msg"]) || map_path(payload, [:params, :msg])
   end
-
-  defp event_msg_wrapper(_payload), do: nil
 
   defp payload_candidates(payload) when is_map(payload) do
     [
@@ -1370,8 +1333,6 @@ defmodule SymphonyElixir.Codex.AppServer do
     ]
     |> Enum.filter(&is_map/1)
   end
-
-  defp payload_candidates(_payload), do: []
 
   defp exhausted_rate_limits?(rate_limits) when is_map(rate_limits) do
     [Map.get(rate_limits, "primary") || Map.get(rate_limits, :primary), Map.get(rate_limits, "secondary") || Map.get(rate_limits, :secondary)]
@@ -1403,47 +1364,52 @@ defmodule SymphonyElixir.Codex.AppServer do
   defp map_path(_payload, _path), do: nil
 
   defp map_integer(map, keys) when is_map(map) and is_list(keys) do
-    Enum.find_value(keys, fn key ->
-      case Map.get(map, key) do
-        value when is_integer(value) ->
-          value
-
-        value when is_binary(value) ->
-          case Integer.parse(String.trim(value)) do
-            {integer, _rest} -> integer
-            _ -> nil
-          end
-
-        _ ->
-          nil
-      end
-    end)
+    Enum.find_value(keys, fn key -> parse_integer_value(Map.get(map, key)) end)
   end
 
   defp map_integer(_map, _keys), do: nil
 
   defp map_number(map, keys) when is_map(map) and is_list(keys) do
-    Enum.find_value(keys, fn key ->
-      case Map.get(map, key) do
-        value when is_integer(value) ->
-          value * 1.0
-
-        value when is_float(value) ->
-          value
-
-        value when is_binary(value) ->
-          case Float.parse(String.trim(value)) do
-            {number, _rest} -> number
-            _ -> nil
-          end
-
-        _ ->
-          nil
-      end
-    end)
+    Enum.find_value(keys, fn key -> parse_number_value(Map.get(map, key)) end)
   end
 
   defp map_number(_map, _keys), do: nil
+
+  defp usage_value(candidate) when is_map(candidate) do
+    Map.get(candidate, "total_token_usage") ||
+      Map.get(candidate, :total_token_usage) ||
+      Map.get(candidate, "totalTokenUsage") ||
+      Map.get(candidate, :totalTokenUsage) ||
+      map_path(candidate, ["info", "total_token_usage"]) ||
+      map_path(candidate, [:info, :total_token_usage]) ||
+      map_path(candidate, ["info", "totalTokenUsage"]) ||
+      map_path(candidate, [:info, :totalTokenUsage])
+  end
+
+  defp usage_value(_candidate), do: nil
+
+  defp parse_integer_value(value) when is_integer(value), do: value
+
+  defp parse_integer_value(value) when is_binary(value) do
+    case Integer.parse(String.trim(value)) do
+      {integer, _rest} -> integer
+      _ -> nil
+    end
+  end
+
+  defp parse_integer_value(_value), do: nil
+
+  defp parse_number_value(value) when is_integer(value), do: value * 1.0
+  defp parse_number_value(value) when is_float(value), do: value
+
+  defp parse_number_value(value) when is_binary(value) do
+    case Float.parse(String.trim(value)) do
+      {number, _rest} -> number
+      _ -> nil
+    end
+  end
+
+  defp parse_number_value(_value), do: nil
 
   defp shell_escape(value) when is_binary(value) do
     "'" <> String.replace(value, "'", "'\"'\"'") <> "'"

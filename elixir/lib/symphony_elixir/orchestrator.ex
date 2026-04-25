@@ -1155,22 +1155,7 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp handle_active_retry(state, issue, attempt, metadata) do
-    if !codex_budget_available?(state, metadata[:rate_limits]) do
-      Logger.debug("Codex budget still unavailable for #{issue_context(issue)}; retrying when the reset window arrives")
-
-      {:noreply,
-       schedule_issue_retry(
-         state,
-         issue.id,
-         attempt,
-         Map.merge(metadata, %{
-           identifier: issue.identifier,
-           error: "waiting for Codex token budget reset",
-           delay_type: :budget_wait,
-           rate_limits: Map.get(state, :codex_rate_limits) || metadata[:rate_limits]
-         })
-       )}
-    else
+    if codex_budget_available?(state, metadata[:rate_limits]) do
       if retry_candidate_issue?(issue, terminal_state_set()) and
            dispatch_slots_available?(issue, state) and
            worker_slots_available?(state, metadata[:worker_host]) do
@@ -1189,6 +1174,21 @@ defmodule SymphonyElixir.Orchestrator do
            })
          )}
       end
+    else
+      Logger.debug("Codex budget still unavailable for #{issue_context(issue)}; retrying when the reset window arrives")
+
+      {:noreply,
+       schedule_issue_retry(
+         state,
+         issue.id,
+         attempt,
+         Map.merge(metadata, %{
+           identifier: issue.identifier,
+           error: "waiting for Codex token budget reset",
+           delay_type: :budget_wait,
+           rate_limits: Map.get(state, :codex_rate_limits) || metadata[:rate_limits]
+         })
+       )}
     end
   end
 
@@ -1227,8 +1227,6 @@ defmodule SymphonyElixir.Orchestrator do
     |> Enum.filter(&rate_limit_bucket_exhausted?/1)
   end
 
-  defp exhausted_rate_limit_buckets(_rate_limits), do: []
-
   defp bucket_reset_delay_ms(bucket, now_unix) when is_map(bucket) and is_integer(now_unix) do
     case bucket_reset_at(bucket) do
       reset_at when is_integer(reset_at) and reset_at > now_unix ->
@@ -1254,8 +1252,6 @@ defmodule SymphonyElixir.Orchestrator do
     ])
   end
 
-  defp bucket_reset_at(_bucket), do: nil
-
   defp rate_limit_bucket_exhausted?(bucket) when is_map(bucket) do
     used_percent =
       map_first_number_value(bucket, [
@@ -1274,47 +1270,39 @@ defmodule SymphonyElixir.Orchestrator do
   defp rate_limit_bucket_exhausted?(_bucket), do: false
 
   defp map_first_integer_value(map, keys) when is_map(map) and is_list(keys) do
-    Enum.find_value(keys, fn key ->
-      case Map.get(map, key) do
-        value when is_integer(value) ->
-          value
-
-        value when is_binary(value) ->
-          case Integer.parse(String.trim(value)) do
-            {integer, _rest} -> integer
-            _ -> nil
-          end
-
-        _ ->
-          nil
-      end
-    end)
+    Enum.find_value(keys, fn key -> parse_integer_value(Map.get(map, key)) end)
   end
 
   defp map_first_integer_value(_map, _keys), do: nil
 
   defp map_first_number_value(map, keys) when is_map(map) and is_list(keys) do
-    Enum.find_value(keys, fn key ->
-      case Map.get(map, key) do
-        value when is_integer(value) ->
-          value * 1.0
-
-        value when is_float(value) ->
-          value
-
-        value when is_binary(value) ->
-          case Float.parse(String.trim(value)) do
-            {number, _rest} -> number
-            _ -> nil
-          end
-
-        _ ->
-          nil
-      end
-    end)
+    Enum.find_value(keys, fn key -> parse_number_value(Map.get(map, key)) end)
   end
 
   defp map_first_number_value(_map, _keys), do: nil
+
+  defp parse_integer_value(value) when is_integer(value), do: value
+
+  defp parse_integer_value(value) when is_binary(value) do
+    case Integer.parse(String.trim(value)) do
+      {integer, _rest} -> integer
+      _ -> nil
+    end
+  end
+
+  defp parse_integer_value(_value), do: nil
+
+  defp parse_number_value(value) when is_integer(value), do: value * 1.0
+  defp parse_number_value(value) when is_float(value), do: value
+
+  defp parse_number_value(value) when is_binary(value) do
+    case Float.parse(String.trim(value)) do
+      {number, _rest} -> number
+      _ -> nil
+    end
+  end
+
+  defp parse_number_value(_value), do: nil
 
   defp clear_blocked_issue(%State{} = state, issue_id) when is_binary(issue_id) do
     if Map.has_key?(state.blocked, issue_id) do
@@ -1703,8 +1691,6 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
-  defp countable_turn_progress_update?(_update), do: false
-
   defp countable_turn_payload?(payload) when is_map(payload) do
     method = Map.get(payload, "method") || Map.get(payload, :method)
     event_type = payload_event_type(payload)
@@ -2062,8 +2048,6 @@ defmodule SymphonyElixir.Orchestrator do
         other
     end
   end
-
-  defp payload_event_type(_payload), do: nil
 
   defp integer_token_map?(payload) do
     token_fields = [

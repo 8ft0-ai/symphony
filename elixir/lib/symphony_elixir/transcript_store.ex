@@ -397,14 +397,16 @@ defmodule SymphonyElixir.TranscriptStore do
   end
 
   defp read_session_events_from_file(session_path) do
-    session_path
-    |> File.stream!([], :line)
-    |> Enum.reduce_while({:ok, []}, fn line, {:ok, acc} ->
-      decode_session_event_line(line, session_path, acc)
-    end)
-    |> case do
-      {:ok, events} -> {:ok, Enum.reverse(events)}
-      {:error, reason} -> {:error, reason}
+    with {:ok, content} <- File.read(session_path) do
+      content
+      |> String.split("\n", trim: true)
+      |> Enum.reduce_while({:ok, []}, fn line, {:ok, acc} ->
+        decode_session_event_line(line, session_path, acc)
+      end)
+      |> case do
+        {:ok, events} -> {:ok, Enum.reverse(events)}
+        {:error, reason} -> {:error, reason}
+      end
     end
   end
 
@@ -468,7 +470,7 @@ defmodule SymphonyElixir.TranscriptStore do
   defp event_sequence(_event), do: 0
 
   defp sort_key_for_session(session) do
-    date_time_or_min(session["started_at"]) || date_time_or_min(session["last_event_at"])
+    date_time_or_nil(session["started_at"]) || date_time_or_min(session["last_event_at"])
   end
 
   defp sort_key_for_event(event) do
@@ -483,6 +485,15 @@ defmodule SymphonyElixir.TranscriptStore do
   end
 
   defp date_time_or_min(_value), do: ~U[0000-01-01 00:00:00Z]
+
+  defp date_time_or_nil(value) when is_binary(value) do
+    case DateTime.from_iso8601(value) do
+      {:ok, datetime, _offset} -> datetime
+      _ -> nil
+    end
+  end
+
+  defp date_time_or_nil(_value), do: nil
 
   defp issue_id(%Issue{id: issue_id}) when is_binary(issue_id), do: issue_id
   defp issue_id(%{id: issue_id}) when is_binary(issue_id), do: issue_id
